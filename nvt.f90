@@ -61,13 +61,10 @@ type(mt19937) :: random
 type(tMSD) :: MSD
 type(tACF) :: ACF
 integer :: out
-#define trans_rot md%Options%translate = .true.;  md%Options%rotate = .true.
-#define transOnly md%Options%translate = .true.;  md%Options%rotate = .false.
-#define rotOnly   md%Options%translate = .false.; md%Options%rotate = .true.
 
-character(*), parameter :: titles = "Step Temp Ts Press Ps KinEng KinEng_t KinEng_r "// &
+character(*), parameter :: titles = "Step Temp Press KinEng KinEng_t KinEng_r "// &
                                     "KinEng_r1 KinEng_r2 KinEng_r3 DispEng CoulEng PotEng "// &
-                                    "TotEng H_nhc Virial BodyVirial Ks Ks_t Ks_r Us Hs Hs_nhc"
+                                    "TotEng Virial BodyVirial H_nhc"
 
 ! Executable code:
 #ifdef coul
@@ -176,7 +173,7 @@ contains
   subroutine execute_step
     select case (method)
       case (velocity_verlet); call EmDee_verlet_step( md, dt )
-      case (nose_hoover_chain); call Pscaling_Step
+      case (nose_hoover_chain); call NHC_Step
       case (stochastic_velocity_rescaling); call Bussi_Step
     end select
   end subroutine execute_step
@@ -222,17 +219,13 @@ contains
   end subroutine Report
   !-------------------------------------------------------------------------------------------------
   character(sl) function properties()
-    real(rb) :: Temp, Ts, H, Hs
+    real(rb) :: Temp, H
     Temp = (md%Energy%Kinetic/KE_sp)*T
-    Ts = (md%Energy%ShadowKinetic/KE_sp)*T
     H = md%Energy%Potential + md%Energy%Kinetic
-    Hs = md%Energy%ShadowPotential + md%Energy%ShadowKinetic
     if (method == nose_hoover_chain) Hthermo = thermostat%energy()
     properties = trim(adjustl(int2str(step))) // " " // &
                  join(real2str([ Temp, &
-                                 Ts, &
                                  Pconv*((NB-1)*kB*Temp + md%Virial/3.0_rb)/Volume, &
-                                 Pconv*((NB-1)*kB*Ts + md%Virial/3.0_rb)/Volume, &
                                  mvv2e*[md%Energy%Kinetic, &
                                         md%Energy%Kinetic - md%Energy%Rotational, &
                                         md%Energy%Rotational, &
@@ -241,15 +234,9 @@ contains
                                         md%Energy%Coulomb, &
                                         md%Energy%Potential, &
                                         H, &
-                                        H + Hthermo, &
                                         md%Virial, &
                                         md%BodyVirial, &
-                                        md%Energy%ShadowKinetic, &
-                                        md%Energy%ShadowKinetic - md%Energy%ShadowRotational, &
-                                        md%Energy%ShadowRotational, &
-                                        md%Energy%ShadowPotential, &
-                                        Hs, &
-                                        Hs + Hthermo]]))
+                                        H + Hthermo]]))
   end function properties
   !-------------------------------------------------------------------------------------------------
   subroutine Get_Command_Line_Args( threads, filename )
@@ -376,13 +363,13 @@ contains
     call EmDee_boost( md, zero, -log(factor)/dt, dt_2 )
   end subroutine Bussi_Step
   !-------------------------------------------------------------------------------------------------
-  subroutine Pscaling_Step
+  subroutine NHC_Step
       call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
       call EmDee_boost( md, zero, thermostat%damping, dt_2 )
       call EmDee_verlet_step( md, dt )
       call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
       call EmDee_boost( md, zero, thermostat%damping, dt_2 )
-  end subroutine Pscaling_Step
+  end subroutine NHC_Step
 !-----------------------------------------------------------------------------------------------------
   subroutine ComputeTheta
     integer :: ind, i, j
