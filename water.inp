@@ -1,17 +1,15 @@
-[Base para nomes de arquivos]
+[Base for file names]
 water
-[Arquivo com configuração inicial]
+[Initial configuration file]
 water.lmp
-[Temperatura (K)]
+[Temperature (K)]
 298
-[Distância de corte (Å)]
+[Cut-off distance (Å)]
 10.0 9.5 0.29
-[Semente para geração de números aleatórios]
+[Seed for random numbers]
 2345
-[Passo de integração (fs)]
+[Integration time step (fs)]
 5.0
-[Número de passos de MD por passo de MC]
-10
 [Distância extra para lista de vizinhos (Å)]
 2
 [Intervalo para gravação de configurações]
@@ -26,11 +24,7 @@ water.lmp
 20 6 40
 [Rotation mode: 0 - Exact; n > 0 - Miller with n respa steps]
 0
-[Compute MSD: 0 - No; 1 - Yes - Parâmetros = nevery blocksize nfreq]
-0 10 10 100
-[Compute DIPOLE:0 - No; 1 - Yes - Parâmetros = nevery blocksize nfreq]
-0 10 20 100
 [Compute rdf: number of pairs]
-2
-[Compute rdf: 0 - No; 1 - Yes - - Parâmetros = nevery nfreq bins itypes jtypes]
-0 50 1000 50 1 1 1 2
+0
+[Compute rdf parameters:nevery bins itypes jtypes]
+50 50 1 1 1 2
