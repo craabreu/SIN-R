@@ -17,6 +17,10 @@ real(rb), parameter :: kB = 8.31451E-7_rb             ! Boltzmann constant in Da
 real(rb), parameter :: Pconv = 1.6388244954E+8_rb     ! Da/(A*fs²) to atm
 real(rb), parameter :: kCoul = 0.13893545755135628_rb ! Coulomb constant in Da*A³/(fs*e)²
 
+integer, parameter :: velocity_verlet = 0, &
+                      nose_hoover_chain = 1, &
+                      stochastic_velocity_rescaling  = 2
+
 ! Simulation specifications:
 character(sl) :: Base
 integer       :: i, N, NB, seed, MDsteps, Nconf, thermo, Nequil, Nprod, rotationMode
@@ -27,10 +31,9 @@ integer  :: dof
 real(rb) :: Volume
 
 ! Thermostat variables:
-integer :: method, M, ndamp, nloops, nts
-logical :: single
+integer :: method, M, ndamp, nloops
 real(rb) :: tdamp, Hthermo
-class(nhc), pointer :: thermostat(:)
+class(nhc), pointer :: thermostat
 
 ! Mean Square Displacement variables:
 real(rb), pointer :: Rcm(:,:)
@@ -172,17 +175,9 @@ contains
   !-------------------------------------------------------------------------------------------------
   subroutine execute_step
     select case (method)
-      case (0); call EmDee_verlet_step( md, dt )
-      case (1); call Pscaling_Step
-      case (2); call Boosting_Step
-      case (3); call Kamberaj_Step
-      case (4); call Hybrid_Step
-      case (5); call New_Hybrid_Step
-      case (6); call Pscaling_Shadow_Step
-      case (7); call Bussi_Step
-      case (8); call Bussi_Shadow_Step
-      case (9); call Embedded_Step
-      case (10); call Intertwined_Step
+      case (velocity_verlet); call EmDee_verlet_step( md, dt )
+      case (nose_hoover_chain); call Pscaling_Step
+      case (stochastic_velocity_rescaling); call Bussi_Step
     end select
   end subroutine execute_step
   !-------------------------------------------------------------------------------------------------
@@ -232,7 +227,7 @@ contains
     Ts = (md%Energy%ShadowKinetic/KE_sp)*T
     H = md%Energy%Potential + md%Energy%Kinetic
     Hs = md%Energy%ShadowPotential + md%Energy%ShadowKinetic
-    if (any([1,2,3,4,5,6,9,10] == method)) Hthermo = sum(thermostat%energy())
+    if (method == nose_hoover_chain) Hthermo = thermostat%energy()
     properties = trim(adjustl(int2str(step))) // " " // &
                  join(real2str([ Temp, &
                                  Ts, &
@@ -294,7 +289,6 @@ contains
     read(inp,*); read(inp,*) Nequil, Nprod
     read(inp,*); read(inp,*) method
     read(inp,*); read(inp,*) ndamp, M, nloops
-    read(inp,*); read(inp,*) nts
     read(inp,*); read(inp,*) rotationMode
     read(inp,*); read(inp,*) DoMSD, nevery, blocksize, nfreq
     read(inp,*); read(inp,*) DoDipole, Dnevery, Dblocksize, Dnfreq
@@ -318,7 +312,6 @@ contains
     call writeln( "Number of production steps:", int2str(Nprod) )
     call writeln( "Thermostat method:", int2str(method) )
     call writeln( "Thermostat parameters:", int2str(ndamp), int2str(M), int2str(nloops) )
-    call writeln( "Number of thermostat chains:", int2str(nts) )
     if (rotationMode == 0) then
       call writeln( "Rotation mode: exact solution" )
     else
@@ -342,57 +335,16 @@ contains
     KE_sp = half*dof*kT
     Volume = Lx*Ly*Lz
     call random % setup( seed )
-    if ((nts < 1).or.(nts > 2)) call error( "wrong translation/rotation thermostat scheme" )
-    single = (nts == 1)
-    select case (method)
-      case (0,1,4,6,7,8,9); allocate( nhc_pscaling :: thermostat(nts) )
-      case (10); allocate( nhc_pscaling :: thermostat(2) )
-      case (2,5); allocate( nhc_boosting :: thermostat(nts) )
-      case (3); allocate( nhc_kamberaj :: thermostat(nts) )
-      case default; call error( "unknown thermostat method" )
-    end select
+    if (.not.any(method == [velocity_verlet, nose_hoover_chain, stochastic_velocity_rescaling])) then
+        call error("Specified method not implemented")
+    end if
+    if (method == nose_hoover_chain) then
+        allocate( nhc_pscaling :: thermostat )
+        call thermostat % setup( M, kT, ndamp*dt, 6*NB-3, nloops )
+    end if
     tdamp = ndamp*dt
     Hthermo = 0.0_rb
-    if (method == 5) then ! New Hybrid
-      call thermostat(1) % setup( M, kT, ndamp*dt, (6/nts)*NB-3, 1 )
-      if (nts == 2) call thermostat(2) % setup( M, kT, tdamp, 3*NB, 1 )
-    else if (method == 10) then ! Intertwined
-        call thermostat % setup( M, kT, ndamp*dt, 6*NB-3, nloops )
-    else
-      call thermostat(1) % setup( M, kT, ndamp*dt, (6/nts)*NB-3, nloops )
-      if (nts == 2) call thermostat(2) % setup( M, kT, tdamp, 3*NB, nloops )
-    end if
   end subroutine Setup_Simulation
-  !-------------------------------------------------------------------------------------------------
-  subroutine Intertwined_Step
-      if (single) then
-          call thermostat(1) % integrate( dt_4, two*md%Energy%Kinetic )
-          call EmDee_boost( md, zero, thermostat(1)%damping, dt_4 )
-
-          call EmDee_boost( md, one, zero, dt_2 )
-          call thermostat(1) % integrate( dt_2, two*md%Energy%Kinetic )
-          call EmDee_displace( md, thermostat(1)%meanFactor, zero, dt )
-          call EmDee_boost( md, zero, thermostat(1)%damping, dt_2 )
-          call EmDee_boost( md, one, zero, dt_2 )
-
-          call thermostat(1) % integrate( dt_4, two*md%Energy%Kinetic )
-          call EmDee_boost( md, zero, thermostat(1)%damping, dt_4 )
-      else
-          call error("Double embedded thermostat not implemented")
-      end if
-  end subroutine Intertwined_Step
-  !-------------------------------------------------------------------------------------------------
-  subroutine Embedded_Step
-      if (single) then
-          call EmDee_boost( md, one, zero, dt_2 )
-          call thermostat(1) % integrate( dt, two*md%Energy%Kinetic )
-          call EmDee_displace( md, thermostat(1)%meanFactor, zero, dt )
-          call EmDee_boost( md, zero, thermostat(1)%damping, dt )
-          call EmDee_boost( md, one, zero, dt_2 )
-      else
-          call error("Double embedded thermostat not implemented")
-      end if
-  end subroutine Embedded_Step
   !-------------------------------------------------------------------------------------------------
   function BussiScale(KE, KE_sp, dof, tau, dt) result( alphaSq )
     real(rb), intent(in) :: KE, KE_sp, tau, dt
@@ -424,253 +376,13 @@ contains
     call EmDee_boost( md, zero, -log(factor)/dt, dt_2 )
   end subroutine Bussi_Step
   !-------------------------------------------------------------------------------------------------
-  subroutine Bussi_Shadow_Step
-    real(rb) :: factor
-    factor = BussiScale( md%Energy%ShadowKinetic, KE_sp, dof, tdamp, dt_2 )
-    Hthermo = Hthermo + (1.0 - factor)*md%Energy%ShadowKinetic
-    call EmDee_boost( md, zero, -log(factor)/dt, dt_2 )
-    call EmDee_verlet_step( md, dt )
-    factor = BussiScale( md%Energy%ShadowKinetic, KE_sp, dof, tdamp, dt_2 )
-    Hthermo = Hthermo + (1.0 - factor)*md%Energy%ShadowKinetic
-    call EmDee_boost( md, zero, -log(factor)/dt, dt_2 )
-    md%Energy%ShadowKinetic = factor*md%Energy%ShadowKinetic
-    md%Energy%ShadowRotational = factor*md%Energy%ShadowRotational
-  end subroutine Bussi_Shadow_Step
-  !-------------------------------------------------------------------------------------------------
   subroutine Pscaling_Step
-    if (single) then
-      call thermostat(1) % integrate( dt_2, two*md%Energy%Kinetic )
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_2 )
+      call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
+      call EmDee_boost( md, zero, thermostat%damping, dt_2 )
       call EmDee_verlet_step( md, dt )
-      call thermostat(1) % integrate( dt_2, two*md%Energy%Kinetic )
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_2 )
-    else
-      call thermostat(1) % integrate( dt_2, two*(md%Energy%Kinetic - md%Energy%Rotational) )
-      call thermostat(2) % integrate( dt_2, two*md%Energy%Rotational )
-      transOnly
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_2 )
-      rotOnly
-      call EmDee_boost( md, zero, thermostat(2)%damping, dt_2 )
-      trans_rot
-      call EmDee_boost( md, one, zero, dt_2 )
-      call EmDee_displace( md, one, zero, dt )
-      call EmDee_boost( md, one, zero, dt_2 )
-      call thermostat(1) % integrate( dt_2, two*(md%Energy%Kinetic - md%Energy%Rotational) )
-      call thermostat(2) % integrate( dt_2, two*md%Energy%Rotational )
-      transOnly
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_2 )
-      rotOnly
-      call EmDee_boost( md, zero, thermostat(2)%damping, dt_2 )
-      trans_rot
-    end if
+      call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
+      call EmDee_boost( md, zero, thermostat%damping, dt_2 )
   end subroutine Pscaling_Step
-  !-------------------------------------------------------------------------------------------------
-  subroutine Pscaling_Shadow_Step
-    real(rb) :: alpha, factor
-    if (single) then
-      call thermostat(1) % integrate( dt_2, two*md%Energy%ShadowKinetic )
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_2 )
-      call EmDee_verlet_step( md, dt )
-      call thermostat(1) % integrate( dt_2, two*md%Energy%ShadowKinetic )
-      alpha = thermostat(1)%damping
-      call EmDee_boost( md, zero, alpha, dt_2 )
-      factor = exp(-alpha*dt)
-      md%Energy%ShadowKinetic = factor*md%Energy%ShadowKinetic
-      md%Energy%ShadowRotational = factor*md%Energy%ShadowRotational
-    else
-      call error("P-scaling shadow only admits single thermostat")
-    end if
-  end subroutine Pscaling_Shadow_Step
-  !-------------------------------------------------------------------------------------------------
-  subroutine New_Hybrid_Step
-    integer :: i
-    real(rb) :: alpha1, alpha2, dt_2N, dt_4N
-    dt_2N = dt_2/nloops
-    dt_4N = dt_4/nloops
-    if (single) then
-      do i = 1, nloops
-        call thermostat(1) % integrate( dt_4N, two*md%Energy%Kinetic )
-        alpha1 = thermostat(1)%p(1)*thermostat(1)%InvQ(1)
-        thermostat(1)%eta(1) = thermostat(1)%eta(1) + alpha1*dt_2N
-        call EmDee_boost( md, one, alpha1, dt_2N )
-        call thermostat(1) % integrate( dt_4N, two*md%Energy%Kinetic )
-      end do
-      call EmDee_displace( md, one, zero, dt )
-      do i = 1, nloops
-        call thermostat(1) % integrate( dt_4N, two*md%Energy%Kinetic )
-        alpha1 = thermostat(1)%p(1)*thermostat(1)%InvQ(1)
-        thermostat(1)%eta(1) = thermostat(1)%eta(1) + alpha1*dt_2N
-        call EmDee_boost( md, one, alpha1, dt_2N )
-        call thermostat(1) % integrate( dt_4N, two*md%Energy%Kinetic )
-      end do
-    else
-      do i = 1, nloops
-        call thermostat % integrate( dt_4N, two*[md%Energy%Kinetic - md%Energy%Rotational, md%Energy%Rotational] )
-        alpha1 = thermostat(1)%p(1)*thermostat(1)%InvQ(1)
-        thermostat(1)%eta(1) = thermostat(1)%eta(1) + alpha1*dt_2N
-        transOnly
-        call EmDee_boost( md, one, alpha1, dt_2N )
-        alpha2 = thermostat(2)%p(1)*thermostat(2)%InvQ(1)
-        thermostat(2)%eta(1) = thermostat(2)%eta(1) + alpha2*dt_2N
-        rotOnly
-        call EmDee_boost( md, one, alpha2, dt_2N )
-        call thermostat % integrate( dt_4N, two*[md%Energy%Kinetic - md%Energy%Rotational, md%Energy%Rotational] )
-      end do
-      trans_rot
-      call EmDee_displace( md, one, zero, dt )
-      do i = 1, nloops
-        call thermostat % integrate( dt_4N, two*[md%Energy%Kinetic - md%Energy%Rotational, md%Energy%Rotational] )
-        alpha1 = thermostat(1)%p(1)*thermostat(1)%InvQ(1)
-        thermostat(1)%eta(1) = thermostat(1)%eta(1) + alpha1*dt_2N
-        transOnly
-        call EmDee_boost( md, one, alpha1, dt_2N )
-        alpha2 = thermostat(2)%p(1)*thermostat(2)%InvQ(1)
-        thermostat(2)%eta(1) = thermostat(2)%eta(1) + alpha2*dt_2N
-        rotOnly
-        call EmDee_boost( md, one, alpha2, dt_2N )
-        call thermostat % integrate( dt_4N, two*[md%Energy%Kinetic - md%Energy%Rotational, md%Energy%Rotational] )
-      end do
-      trans_rot
-    end if
-  end subroutine New_Hybrid_Step
-  !-------------------------------------------------------------------------------------------------
-  subroutine Hybrid_Step
-    if (single) then
-      call thermostat(1) % integrate( dt_4, two*md%Energy%Kinetic )
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_4 )
-
-      call EmDee_boost( md, one, zero, dt_2 )
-
-      call thermostat(1) % integrate( dt_4, two*md%Energy%Kinetic )
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_4 )
-
-      call EmDee_displace( md, one, zero, dt )
-
-      call thermostat(1) % integrate( dt_4, two*md%Energy%Kinetic )
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_4 )
-
-      call EmDee_boost( md, one, zero, dt_2 )
-
-      call thermostat(1) % integrate( dt_4, two*md%Energy%Kinetic )
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_4 )
-    else
-      call thermostat % integrate( dt_4, two*[md%Energy%Kinetic - md%Energy%Rotational, md%Energy%Rotational] )
-      transOnly
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_4 )
-      rotOnly
-      call EmDee_boost( md, zero, thermostat(2)%damping, dt_4 )
-
-      trans_rot
-      call EmDee_boost( md, one, zero, dt_2 )
-
-      call thermostat % integrate( dt_4, two*[md%Energy%Kinetic - md%Energy%Rotational, md%Energy%Rotational] )
-      transOnly
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_4 )
-      rotOnly
-      call EmDee_boost( md, zero, thermostat(2)%damping, dt_4 )
-
-      call EmDee_displace( md, one, zero, dt )
-
-      call thermostat % integrate( dt_4, two*[md%Energy%Kinetic - md%Energy%Rotational, md%Energy%Rotational] )
-      transOnly
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_4 )
-      rotOnly
-      call EmDee_boost( md, zero, thermostat(2)%damping, dt_4 )
-
-      trans_rot
-      call EmDee_boost( md, one, zero, dt_2 )
-
-      call thermostat % integrate( dt_4, two*[md%Energy%Kinetic - md%Energy%Rotational, md%Energy%Rotational] )
-      transOnly
-      call EmDee_boost( md, zero, thermostat(1)%damping, dt_4 )
-      rotOnly
-      call EmDee_boost( md, zero, thermostat(2)%damping, dt_4 )
-      trans_rot
-    end if
-  end subroutine Hybrid_Step
-  !-------------------------------------------------------------------------------------------------
-  subroutine Boosting_Step
-    real(rb) :: alpha1, alpha2
-    if (single) then
-      call thermostat(1) % integrate( dt_2, two*md%Energy%Kinetic )
-      alpha1 = thermostat(1)%p(1)*thermostat(1)%InvQ(1)
-      call EmDee_boost( md, one, alpha1, dt_2 )
-      call EmDee_displace( md, one, zero, dt )
-      thermostat(1)%eta(1) = thermostat(1)%eta(1) + alpha1*dt
-      call EmDee_boost( md, one, alpha1, dt_2 )
-      call thermostat(1) % integrate( dt_2, two*md%Energy%Kinetic )
-    else
-      call thermostat % integrate( dt_2, two*[md%Energy%Kinetic - md%Energy%Rotational, md%Energy%Rotational] )
-      alpha1 = thermostat(1)%p(1)*thermostat(1)%InvQ(1)
-      alpha2 = thermostat(2)%p(1)*thermostat(2)%InvQ(1)
-      transOnly
-      call EmDee_boost( md, one, alpha1, dt_2 )
-      rotOnly
-      call EmDee_boost( md, one, alpha2, dt_2 )
-      trans_rot
-      call EmDee_displace( md, one, zero, dt )
-      thermostat(1)%eta(1) = thermostat(1)%eta(1) + alpha1*dt
-      thermostat(2)%eta(1) = thermostat(2)%eta(1) + alpha2*dt
-      transOnly
-      call EmDee_boost( md, one, alpha1, dt_2 )
-      rotOnly
-      call EmDee_boost( md, one, alpha2, dt_2 )
-      call thermostat % integrate( dt_2, two*[md%Energy%Kinetic - md%Energy%Rotational, md%Energy%Rotational] )
-      trans_rot
-    end if
-  end subroutine Boosting_Step
-  !-------------------------------------------------------------------------------------------------
-  subroutine Kamberaj_Single_Thermostat_Step
-    call EmDee_boost( md, one, zero, dt_2 )
-    call EmDee_boost( md, zero, thermostat(1)%p(1)*thermostat(1)%InvQ(1), dt_2 )
-    call EmDee_displace( md, one, zero, dt )
-    call thermostat(1) % integrate( dt, two*md%Energy%Kinetic )
-    call EmDee_boost( md, zero, thermostat(1)%p(1)*thermostat(1)%InvQ(1), dt_2 )
-    call EmDee_boost( md, one, zero, dt_2 )
-  end subroutine Kamberaj_Single_Thermostat_Step
-  !-------------------------------------------------------------------------------------------------
-  subroutine Kamberaj_Step
-    call EmDee_boost( md, one, zero, dt_2 )
-    if (single) then
-      call EmDee_boost( md, zero, thermostat(1)%p(1)*thermostat(1)%InvQ(1), dt_2 )
-      call EmDee_displace( md, one, zero, dt )
-      call thermostat(1) % integrate( dt, two*md%Energy%Kinetic )
-      call EmDee_boost( md, zero, thermostat(1)%p(1)*thermostat(1)%InvQ(1), dt_2 )
-    else
-      transOnly
-      call EmDee_boost( md, zero, thermostat(1)%p(1)*thermostat(1)%InvQ(1), dt_2 )
-      rotOnly
-      call EmDee_boost( md, zero, thermostat(2)%p(1)*thermostat(2)%InvQ(1), dt_2 )
-      trans_rot
-      call EmDee_displace( md, one, zero, dt )
-      call thermostat % integrate( dt, two*[md%Energy%Kinetic - md%Energy%Rotational, md%Energy%Rotational] )
-      rotOnly
-      call EmDee_boost( md, zero, thermostat(2)%p(1)*thermostat(2)%InvQ(1), dt_2 )
-      transOnly
-      call EmDee_boost( md, zero, thermostat(1)%p(1)*thermostat(1)%InvQ(1), dt_2 )
-      trans_rot
-    end if
-    call EmDee_boost( md, one, zero, dt_2 )
-  end subroutine Kamberaj_Step
-!-----------------------------------------------------------------------------------------------------
-  subroutine Separate_Boost_Step
-    transOnly
-    call EmDee_boost( md, one, zero, dt_4 )
-    rotOnly
-    call EmDee_boost( md, one, zero, dt_4 )
-    trans_rot
-    call EmDee_displace( md, one, zero, dt_2 )
-    rotOnly
-    call EmDee_boost( md, one, zero, dt_2 )
-    transOnly
-    call EmDee_boost( md, one, zero, dt_2 )
-    trans_rot
-    call EmDee_displace( md, one, zero, dt_2 )
-    rotOnly
-    call EmDee_boost( md, one, zero, dt_4 )
-    transOnly
-    call EmDee_boost( md, one, zero, dt_4 )
-   end subroutine Separate_Boost_Step
 !-----------------------------------------------------------------------------------------------------
   subroutine ComputeTheta
     integer :: ind, i, j

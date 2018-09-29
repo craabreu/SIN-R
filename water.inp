@@ -20,12 +20,10 @@ water.lmp
 10
 [Passos de equilibração e de produção]
 1000 1000
-[Método de termostato: 0) NVE; 1) P-scaling; 2) Boosting; 3) Kamberaj; 4) Hybrid; 5) New_Hybrid; 6) P-scaling-Shadow; 7) Bussi; 8) Bussi-Shadow; 9) Embedded, 10) Intertwined]
-10
+[Método de termostato: 0) NVE; 1) NHC; 2) Bussi]
+1
 [Parâmetros do termostato: ndamp, nchain, nloops]
 20 6 40
-[Termostatização de translação e rotação: 1) junto; 2) separado]
-1
 [Rotation mode: 0 - Exact; n > 0 - Miller with n respa steps]
 0
 [Compute MSD: 0 - No; 1 - Yes - Parâmetros = nevery blocksize nfreq]
