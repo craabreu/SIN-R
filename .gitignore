@@ -1,3 +1,8 @@
+# Output files
+nvt_lj_coul
+*.xyz
+*.log
+
 # Prerequisites
 *.d
 

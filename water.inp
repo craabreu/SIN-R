@@ -1,0 +1,38 @@
+[Base para nomes de arquivos]
+water
+[Arquivo com configuração inicial]
+water.lmp
+[Temperatura (K)]
+298
+[Distância de corte (Å)]
+10.0 9.5 0.29
+[Semente para geração de números aleatórios]
+2345
+[Passo de integração (fs)]
+5.0
+[Número de passos de MD por passo de MC]
+10
+[Distância extra para lista de vizinhos (Å)]
+2
+[Intervalo para gravação de configurações]
+1000000
+[Intervalo para gravação de propriedades]
+10
+[Passos de equilibração e de produção]
+1000 1000
+[Método de termostato: 0) NVE; 1) P-scaling; 2) Boosting; 3) Kamberaj; 4) Hybrid; 5) New_Hybrid; 6) P-scaling-Shadow; 7) Bussi; 8) Bussi-Shadow; 9) Embedded, 10) Intertwined]
+10
+[Parâmetros do termostato: ndamp, nchain, nloops]
+20 6 40
+[Termostatização de translação e rotação: 1) junto; 2) separado]
+1
+[Rotation mode: 0 - Exact; n > 0 - Miller with n respa steps]
+0
+[Compute MSD: 0 - No; 1 - Yes - Parâmetros = nevery blocksize nfreq]
+0 10 10 100
+[Compute DIPOLE:0 - No; 1 - Yes - Parâmetros = nevery blocksize nfreq]
+0 10 20 100
+[Compute rdf: number of pairs]
+2
+[Compute rdf: 0 - No; 1 - Yes - - Parâmetros = nevery nfreq bins itypes jtypes]
+0 50 1000 50 1 1 1 2
