@@ -23,10 +23,10 @@ integer, parameter :: velocity_verlet = 0, &
 ! Simulation specifications:
 character(sl) :: Base
 integer       :: i, N, NB, seed, Nconf, thermo, Nequil, Nprod, rotationMode
-real(rb)      :: T, Rc, Rm, dt, skin, alpha
+real(rb)      :: T, Rc, Rm, dt, skin, kspacePrecision
 
 ! System properties:
-integer  :: dof
+integer :: dof
 real(rb) :: Volume
 
 ! Thermostat variables:
@@ -41,25 +41,21 @@ real(rb), allocatable :: gr(:,:), rdf(:,:)
 integer , allocatable :: itype(:), jtype(:)
 
 ! Other variables:
-integer  :: step
+integer :: step
 real(rb) :: dt_2, dt_4, KE_sp, kT
 character(256) :: filename, configFile
 
 integer :: threads
 type(tEmDee) :: md
-type(c_ptr), allocatable :: model(:)
 type(mt19937) :: random
+type(c_ptr), allocatable :: model(:)
 
 character(*), parameter :: titles = "Step Temp Press KinEng KinEng_t KinEng_r "// &
                                     "KinEng_r1 KinEng_r2 KinEng_r3 DispEng CoulEng PotEng "// &
                                     "TotEng Virial BodyVirial H_nhc"
 
 ! Executable code:
-#ifdef coul
-  call writeln( "md/lj/coul ("//__DATE__//")" )
-#else
-  call writeln( "md/lj ("//__DATE__//")" )
-#endif
+call writeln( "md/lj/coul ("//__DATE__//")" )
 
 call Get_Command_Line_Args( threads, filename )
 call Read_Specifications( filename )
@@ -68,7 +64,7 @@ call Config % Read( configFile )
 call Setup_Simulation
 
 allocate( model(Config%ntypes) )
-call Configure_System( md, Rm, Rc, alpha )
+call Configure_System( md, Rm, Rc )
 call Config % Save_XYZ( trim(Base)//".xyz" )
 
 call writeln( titles )
@@ -107,7 +103,7 @@ do step = NEquil+1, NEquil+NProd
     counter = counter + 1
   end if
 end do
-call rdf_save( trim(Base)//".rdf" )
+if (computeRDF) call rdf_save( trim(Base)//".rdf" )
 call writeln( "Loop time of", real2str(md%Time%Total), "s." )
 call Report( md )
 call EmDee_download( md, "coordinates"//c_null_char, c_loc(Config%R(1,1)) )
@@ -124,9 +120,9 @@ contains
     end select
   end subroutine execute_step
   !-------------------------------------------------------------------------------------------------
-  subroutine Configure_System( md, Rm, Rc, alpha )
+  subroutine Configure_System( md, Rm, Rc )
     type(tEmDee), intent(inout) :: md
-    real(rb),     intent(in)    :: Rm, Rc, alpha
+    real(rb),     intent(in)    :: Rm, Rc
 
     md = EmDee_system( threads, 1, Rc, skin, Config%natoms, &
                        c_loc(Config%Type(1)), c_loc(Config%mass(1)), c_loc(Config%Mol(1)) )
@@ -142,10 +138,9 @@ contains
       call EmDee_set_pair_model( md, i, i, model(i), kCoul )
     end do
 
-#   ifdef coul
-      call EmDee_set_coul_model( md, EmDee_coul_damped_smoothed( alpha, Rc-Rm ) )
-      call EmDee_upload( md, "charges"//c_null_char, c_loc(Config%Charge(1)) )
-#   endif
+    call EmDee_set_coul_model( md, EmDee_coul_long() )
+    call EmDee_set_kspace_model( md, EmDee_kspace_ewald( kspacePrecision ) )
+    call EmDee_upload( md, "charges"//c_null_char, c_loc(Config%Charge(1)) )
 
     call EmDee_upload( md, "box"//c_null_char, c_loc(Config%Lx) )
     call EmDee_upload( md, "coordinates"//c_null_char, c_loc(Config%R(1,1)) )
@@ -212,7 +207,8 @@ contains
     read(inp,*); read(inp,*) Base
     read(inp,*); read(inp,*) configFile
     read(inp,*); read(inp,*) T
-    read(inp,*); read(inp,*) Rc, Rm, alpha
+    read(inp,*); read(inp,*) Rc, Rm
+    read(inp,*); read(inp,*) kspacePrecision
     read(inp,*); read(inp,*) seed
     read(inp,*); read(inp,*) dt
     read(inp,*); read(inp,*) skin
