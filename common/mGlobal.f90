@@ -11,7 +11,8 @@ real(rb), parameter :: zero  = 0.0_rb, &
                        six   = 6.0_rb, &
                        half  = 0.5_rb, &
                        third = 0.3333333333333333_rb, &
-                       fourth = 0.25_rb
+                       fourth = 0.25_rb, &
+                       pi = 3.1415926535897932384626433_rb
 
 integer :: stdout = 6                  !< Standard output unit
 integer :: logunit = 0                 !< Output unit for logging
@@ -331,7 +332,7 @@ contains
     real(rb), intent(in) :: a
     character(sl)        :: str
     real(4) :: b
-    b = a
+    b = real(a, 4)
     write(str,*) b
     str = adjustl(str)
   end function real2str

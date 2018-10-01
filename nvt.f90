@@ -22,7 +22,7 @@ integer, parameter :: velocity_verlet = 0, &
 
 ! Simulation specifications:
 character(sl) :: Base
-integer       :: i, N, NB, seed, Nconf, thermo, Nequil, Nprod, rotationMode
+integer       :: N, seed, Nconf, thermo, Nequil, Nprod, rotationMode
 real(rb)      :: T, Rc, Rm, dt, skin, kspacePrecision
 
 ! System properties:
@@ -49,10 +49,11 @@ integer :: threads
 type(tEmDee) :: md
 type(mt19937) :: random
 type(c_ptr), allocatable :: model(:)
+type(c_ptr), allocatable :: bond_model(:)
+type(c_ptr), allocatable :: angle_model(:)
 
-character(*), parameter :: titles = "Step Temp Press KinEng KinEng_t KinEng_r "// &
-                                    "KinEng_r1 KinEng_r2 KinEng_r3 DispEng CoulEng PotEng "// &
-                                    "TotEng Virial BodyVirial H_nhc"
+character(*), parameter :: titles = "Step Temp Press KinEng DispEng CoulEng "// &
+                                    "BondEng AngleEng PotEng TotEng Virial H_nhc"
 
 ! Executable code:
 call writeln( "md/lj/coul ("//__DATE__//")" )
@@ -63,7 +64,7 @@ call Read_Specifications( filename )
 call Config % Read( configFile )
 call Setup_Simulation
 
-allocate( model(Config%ntypes) )
+allocate( model(Config%ntypes), bond_model(Config%nBondTypes), angle_model(Config%nAngleTypes) )
 call Configure_System( md, Rm, Rc )
 call Config % Save_XYZ( trim(Base)//".xyz" )
 
@@ -114,7 +115,7 @@ contains
   !-------------------------------------------------------------------------------------------------
   subroutine execute_step
     select case (method)
-      case (velocity_verlet); call EmDee_verlet_step( md, dt )
+      case (velocity_verlet); call Verlet_Step
       case (nose_hoover_chain); call NHC_Step
       case (stochastic_velocity_rescaling); call Bussi_Step
     end select
@@ -124,9 +125,32 @@ contains
     type(tEmDee), intent(inout) :: md
     real(rb),     intent(in)    :: Rm, Rc
 
+    integer :: i
+    real(rb) :: theta0
+
     md = EmDee_system( threads, 1, Rc, skin, Config%natoms, &
-                       c_loc(Config%Type(1)), c_loc(Config%mass(1)), c_loc(Config%Mol(1)) )
+                       c_loc(Config%Type(1)), c_loc(Config%mass(1)), c_null_ptr )
+
     md%Options%rotationMode = rotationMode
+
+    do i = 1, Config%nBondTypes
+      bond_model(i) = EmDee_bond_harmonic(Config%BondModel(i)%k/mvv2e, Config%BondModel(i)%x0)
+    end do
+    do i = 1, Config%nbonds
+      associate (bond => Config%Bond(i))
+        call EmDee_add_bond( md, bond%atom1, bond%atom2, bond_model(bond%type) )
+      end associate
+    end do
+
+    do i = 1, Config%nAngleTypes
+      theta0 = Config%AngleModel(i)%x0*pi/180.0_rb
+      angle_model(i) = EmDee_angle_harmonic(Config%AngleModel(i)%k/mvv2e, theta0)
+    end do
+    do i = 1, Config%nangles
+      associate (angle => Config%Angle(i))
+        call EmDee_add_angle( md, angle%atom1, angle%atom2, angle%atom3, angle_model(angle%type) )
+      end associate
+    end do
 
     do i = 1, Config%ntypes
       if (abs(Config%epsilon(i)) < epsilon(1.0_rb)) then
@@ -166,17 +190,15 @@ contains
     if (method == nose_hoover_chain) Hthermo = thermostat%energy()
     properties = trim(adjustl(int2str(step))) // " " // &
                  join(real2str([ Temp, &
-                                 Pconv*((NB-1)*kB*Temp + md%Virial/3.0_rb)/Volume, &
+                                 Pconv*((dof-3)*kB*Temp/3 + md%Virial/3.0_rb)/Volume, &
                                  mvv2e*[md%Energy%Kinetic, &
-                                        md%Energy%Kinetic - md%Energy%Rotational, &
-                                        md%Energy%Rotational, &
-                                        md%Energy%RotPart, &
                                         md%Energy%Dispersion, &
                                         md%Energy%Coulomb, &
+                                        md%Energy%Bond, &
+                                        md%Energy%Angle, &
                                         md%Energy%Potential, &
                                         H, &
                                         md%Virial, &
-                                        md%BodyVirial, &
                                         H + Hthermo]]))
   end function properties
   !-------------------------------------------------------------------------------------------------
@@ -255,8 +277,7 @@ contains
     if (Rc+skin >= half*min(Lx,Ly,Lz)) call error( "minimum image convention failed!" )
     dt_2 = half*dt
     dt_4 = 0.25_rb*dt
-    NB = maxval(Config%Mol)
-    dof = 6*NB - 3
+    dof = 3*N - 3
     kT = kB*T
     KE_sp = half*dof*kT
     Volume = Lx*Ly*Lz
@@ -271,6 +292,12 @@ contains
     tdamp = ndamp*dt
     Hthermo = 0.0_rb
   end subroutine Setup_Simulation
+  !-------------------------------------------------------------------------------------------------
+  subroutine Verlet_Step
+      call EmDee_boost( md, one, zero, dt_2 )
+      call EmDee_displace( md, one, zero, dt )
+      call EmDee_boost( md, one, zero, dt_2 )
+  end subroutine Verlet_Step
   !-------------------------------------------------------------------------------------------------
   function BussiScale(KE, KE_sp, dof, tau, dt) result( alphaSq )
     real(rb), intent(in) :: KE, KE_sp, tau, dt
@@ -296,7 +323,7 @@ contains
     factor = BussiScale( md%Energy%Kinetic, KE_sp, dof, tdamp, dt_2 )
     Hthermo = Hthermo + (1.0 - factor)*md%Energy%Kinetic
     call EmDee_boost( md, zero, -log(factor)/dt, dt_2 )
-    call EmDee_verlet_step( md, dt )
+    call Verlet_Step
     factor = BussiScale( md%Energy%Kinetic, KE_sp, dof, tdamp, dt_2 )
     Hthermo = Hthermo + (1.0 - factor)*md%Energy%Kinetic
     call EmDee_boost( md, zero, -log(factor)/dt, dt_2 )
@@ -305,7 +332,7 @@ contains
   subroutine NHC_Step
       call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
       call EmDee_boost( md, zero, thermostat%damping, dt_2 )
-      call EmDee_verlet_step( md, dt )
+      call Verlet_Step
       call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
       call EmDee_boost( md, zero, thermostat%damping, dt_2 )
   end subroutine NHC_Step

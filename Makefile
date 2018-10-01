@@ -12,6 +12,10 @@ else
   FLAGS = $(BASIC_OPTS) $(FAST_OPTS)
 endif
 
+ifdef EMDEE
+  LN_OPTS = -I$(EMDEE)/include $(LN_SO_OPT) -Wl,-rpath,'$(EMDEE)/lib'
+endif
+
 #FORT = gfortran
 #FLAGS = -fno-range-check -march=native -ffast-math -funroll-loops -fstrict-aliasing -O3 -Wunused -cpp -fopenmp
 COMMON = common
@@ -28,7 +32,7 @@ lj: $(EXECUTABLE)_lj
 lj_coul: $(EXECUTABLE)_lj_coul
 
 $(EXECUTABLE)_lj_coul: $(EXECUTABLE).f90 $(LIBFILE) $(SRCS)
-	$(FORT) $(FLAGS) -Dcoul -J$(COMMON) -L$(COMMON) -o $@ $< -l$(LIB) -lemdee
+	$(FORT) $(FLAGS) $(LN_OPTS) -Dcoul -J$(COMMON) -L$(COMMON) -o $@ $< -l$(LIB) -lemdee
 
 $(EXECUTABLE)_lj: $(EXECUTABLE).f90 $(LIBFILE) $(SRCS)
 	$(FORT) $(FLAGS) -J$(COMMON) -L$(COMMON) -o $@ $< -l$(LIB) -lemdee

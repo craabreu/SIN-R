@@ -7,6 +7,14 @@ implicit none
 character, parameter :: element(5) = ["H","C","N","O","S"]
 integer,   parameter :: atomic_mass(5) = [1,12,14,16,32]
 
+type tHarmonicModel
+  real(rb) :: k, x0
+end type tHarmonicModel
+
+type tStructute
+  integer :: type, atom1, atom2, atom3
+end type tStructute
+
 type tConfig
 
   real(rb) :: xmin, xmax, ymin, ymax, zmin, zmax
@@ -28,6 +36,12 @@ type tConfig
   real(rb), allocatable :: InvMass(:)
 
   logical :: velocity_input = .false.
+
+  integer :: nBondTypes, nAngleTypes
+  type(tHarmonicModel), allocatable :: BondModel(:), AngleModel(:)
+
+  integer :: nbonds, nangles
+  type(tStructute), allocatable :: Bond(:), Angle(:)
 
   contains
 
@@ -63,8 +77,20 @@ contains
       if ((narg == 3).and.(join(arg(2:3)) == "atom types")) then
         me % ntypes = str2int( arg(1) )
 
+      else if ((narg == 3).and.(join(arg(2:3)) == "bond types")) then
+        me % nBondTypes = str2int( arg(1) )
+
+      else if ((narg == 3).and.(join(arg(2:3)) == "angle types")) then
+        me % nAngleTypes = str2int( arg(1) )
+
       else if ((narg == 2).and.(arg(2) == "atoms")) then
         me % natoms = str2int( arg(1) )
+
+      else if ((narg == 2).and.(arg(2) == "bonds")) then
+        me % nbonds = str2int( arg(1) )
+
+      else if ((narg == 2).and.(arg(2) == "angles")) then
+        me % nangles = str2int( arg(1) )
 
       else if ((narg == 4).and.(join(arg(3:4)) == "xlo xhi")) then
         me % xmin = str2real(arg(1))
@@ -93,10 +119,31 @@ contains
 
       else if ((narg == 2).and.(join(arg(1:2)) == "Pair Coeffs")) then
         allocate( me % epsilon(me % ntypes), me % sigma(me % ntypes) )
-        do i = 1, me % ntypes
+        do k = 1, me % ntypes
           call next_command( unit, narg, arg )
+          i = str2int(arg(1))
           me % epsilon(i) = str2real(arg(2))
           me % sigma(i) = str2real(arg(3))
+        end do
+
+      else if ((narg == 2).and.(join(arg(1:2)) == "Bond Coeffs")) then
+
+        allocate( me % bondModel(me % nBondTypes) )
+        do k = 1, me % nBondTypes
+          call next_command( unit, narg, arg )
+          i = str2int(arg(1))
+          me % bondModel(i) % k = str2real(arg(2))
+          me % bondModel(i) % x0 = str2real(arg(3))
+        end do
+
+      else if ((narg == 2).and.(join(arg(1:2)) == "Angle Coeffs")) then
+
+        allocate( me % angleModel(me % nAngleTypes) )
+        do k = 1, me % nAngleTypes
+          call next_command( unit, narg, arg )
+          i = str2int(arg(1))
+          me % angleModel(i) % k = str2real(arg(2))
+          me % angleModel(i) % x0 = str2real(arg(3))
         end do
 
       else if ((narg == 1).and.(arg(1) == "Atoms")) then
@@ -147,6 +194,29 @@ contains
           me % Px(i) = mass*str2real(arg(2))
           me % Py(i) = mass*str2real(arg(3))
           me % Pz(i) = mass*str2real(arg(4))
+        end do
+
+      else if ((narg == 1).and.(arg(1) == "Bonds")) then
+
+        allocate( me%Bond(me%nbonds) )
+        do k = 1, me % nbonds
+          call next_command( unit, narg, arg )
+          i = str2int(arg(1))
+          me%Bond(i)%type  = str2int(arg(2))
+          me%Bond(i)%atom1 = str2int(arg(3))
+          me%Bond(i)%atom2 = str2int(arg(4))
+        end do
+
+      else if ((narg == 1).and.(arg(1) == "Angles")) then
+
+        allocate( me%Angle(me%nangles) )
+        do k = 1, me % nangles
+          call next_command( unit, narg, arg )
+          i = str2int(arg(1))
+          me%Angle(i)%type  = str2int(arg(2))
+          me%Angle(i)%atom1 = str2int(arg(3))
+          me%Angle(i)%atom2 = str2int(arg(4))
+          me%Angle(i)%atom3 = str2int(arg(5))
         end do
 
       end if

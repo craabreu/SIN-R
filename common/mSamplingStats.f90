@@ -108,7 +108,7 @@ contains
     character(sl) :: process(2) = ["RoundTrip   ","DownhillWalk"]
     real(rb) :: f, avg, stdev
 
-    open( unit = unit, file = file, status = "replace" )
+    open( newunit = unit, file = file, status = "replace" )
     if (present(lambda).and.present(eta)) then
       write(unit,'("state,lambda,eta,H,Hdown,f")')
       do i = 1, me%NS
