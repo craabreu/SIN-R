@@ -4,14 +4,14 @@ water
 water.lmp
 [Temperature (K)]
 298
-[Cut-off and switching distances (Å)]
-10.0 9.5
+[Internal cut-off, External cut-off, and switching width (Å)]
+6.0 10.0 0.5
 [Precision of reciprocal space calculations]
-0.00001
+0.00023
 [Seed for random numbers]
 2345
 [Integration time step (fs)]
-1.0
+0.1
 [Skin distance for neighbor lists (Å)]
 2
 [Interval for saving configurations]
@@ -19,13 +19,11 @@ water.lmp
 [Interval for displaying properties]
 10
 [Numbers of equilibration and production steps]
-0 1000
+0 0
 [Thermostatting method: 0) NVE; 1) NHC; 2) Bussi]
-1
+0
 [Thermostat parameters: ndamp, nchain, nloops]
 1 6 10
-[Rotation mode: 0 - Exact; n > 0 - Miller with n respa steps]
-0
 [Compute rdf: number of pairs]
 0
 [Compute rdf parameters: nevery bins itypes jtypes]

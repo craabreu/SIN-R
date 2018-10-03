@@ -22,8 +22,8 @@ integer, parameter :: velocity_verlet = 0, &
 
 ! Simulation specifications:
 character(sl) :: Base
-integer       :: N, seed, Nconf, thermo, Nequil, Nprod, rotationMode
-real(rb)      :: T, Rc, Rm, dt, skin, kspacePrecision
+integer       :: N, seed, Nconf, thermo, Nequil, Nprod
+real(rb)      :: T, RcIn, Rc, SwitchWidth, dt, skin, kspacePrecision
 
 ! System properties:
 integer :: dof
@@ -65,15 +65,14 @@ call Config % Read( configFile )
 call Setup_Simulation
 
 allocate( model(Config%ntypes), bond_model(Config%nBondTypes), angle_model(Config%nAngleTypes) )
-call Configure_System( md, Rm, Rc )
+call Configure_System( md )
 call Config % Save_XYZ( trim(Base)//".xyz" )
 
 call writeln( titles )
-step = 0
-call writeln( properties() )
+call writeln( properties(0) )
 do step = 1, NEquil
   call execute_step
-  if (mod(step,thermo) == 0) call writeln( properties() )
+  if (mod(step,thermo) == 0) call writeln( properties(step) )
 end do
 call writeln( "Loop time of", real2str(md%Time%Total), "s." )
 call Report( md )
@@ -81,8 +80,7 @@ call Report( md )
 call writeln( )
 call writeln( "Memory usage" )
 call writeln( titles )
-step = NEquil
-call writeln( properties() )
+call writeln( properties(NEquil) )
 
 if (computeRDF) then
   allocate(gr(bins,npairs), source = 0.0_rb)
@@ -97,7 +95,7 @@ do step = NEquil+1, NEquil+NProd
     call EmDee_download( md, "coordinates"//c_null_char, c_loc(Config%R(1,1)) )
     call Config % Save_XYZ( trim(Base)//".xyz", append = .true. )
   end if
-  if (mod(step,thermo) == 0) call writeln( properties() )
+  if (mod(step,thermo) == 0) call writeln( properties(step) )
   if (computeRDF .and. (mod(step, nevery) == 0)) then
     call EmDee_rdf(md, bins, npairs, itype, jtype, rdf)
     gr = gr + rdf
@@ -121,20 +119,28 @@ contains
     end select
   end subroutine execute_step
   !-------------------------------------------------------------------------------------------------
-  subroutine Configure_System( md, Rm, Rc )
+  subroutine Configure_System( md )
     type(tEmDee), intent(inout) :: md
-    real(rb),     intent(in)    :: Rm, Rc
 
+    integer, parameter :: nlayers = 3
+    integer, parameter :: ones(nlayers) = 1
     integer :: i
     real(rb) :: theta0
+    type(c_ptr) :: LJ, models(nlayers)
 
-    md = EmDee_system( threads, 1, Rc, skin, Config%natoms, &
+    ! Initialize a system with 3 model layers:
+    md = EmDee_system( threads, nlayers, Rc, skin, Config%natoms, &
                        c_loc(Config%Type(1)), c_loc(Config%mass(1)), c_null_ptr )
 
-    md%Options%rotationMode = rotationMode
+    ! Define layer-based parameters:
+    ! Layer 1 - Bond and angle interactions only
+    ! Layer 2 - Smoothed LJ and Coulomb potentials with small cutoff
+    ! Layer 3 - Bond + Angle + Smoothed LJ + Ewald with large cutoff
+    call EmDee_layer_based_parameters( md, [zero, RcIn, Rc], [1, 0, 1] )
 
+    ! Add bond models and bonds:
     do i = 1, Config%nBondTypes
-      bond_model(i) = EmDee_bond_harmonic(Config%BondModel(i)%k/mvv2e, Config%BondModel(i)%x0)
+      bond_model(i) = EmDee_bond_harmonic(two*Config%BondModel(i)%k/mvv2e, Config%BondModel(i)%x0)
     end do
     do i = 1, Config%nbonds
       associate (bond => Config%Bond(i))
@@ -142,9 +148,10 @@ contains
       end associate
     end do
 
+    ! Add angle models and angles:
     do i = 1, Config%nAngleTypes
       theta0 = Config%AngleModel(i)%x0*pi/180.0_rb
-      angle_model(i) = EmDee_angle_harmonic(Config%AngleModel(i)%k/mvv2e, theta0)
+      angle_model(i) = EmDee_angle_harmonic(two*Config%AngleModel(i)%k/mvv2e, theta0)
     end do
     do i = 1, Config%nangles
       associate (angle => Config%Angle(i))
@@ -152,25 +159,36 @@ contains
       end associate
     end do
 
+    ! Add van der Waals interaction pairs:
     do i = 1, Config%ntypes
       if (abs(Config%epsilon(i)) < epsilon(1.0_rb)) then
-        model(i) = EmDee_pair_none()
+        call EmDee_set_pair_model( md, i, i, EmDee_pair_none(), kCoul )
       else
-        model(i) = EmDee_smoothed( &
-                     EmDee_pair_lj_cut( Config%epsilon(i)/mvv2e, Config%sigma(i) ), Rc-Rm )
+        LJ = EmDee_pair_lj_cut( Config%epsilon(i)/mvv2e, Config%sigma(i) )
+        models = [EmDee_pair_none(), &
+                  EmDee_smoothed(LJ, SwitchWidth), &
+                  EmDee_smoothed(LJ, SwitchWidth)]
+        call EmDee_set_pair_multimodel( md, i, i, models, kCoul*ones )
       end if
-      call EmDee_set_pair_model( md, i, i, model(i), kCoul )
     end do
 
-    call EmDee_set_coul_model( md, EmDee_coul_long() )
+    models = [EmDee_coul_none(), EmDee_coul_shifted_smoothed(SwitchWidth), EmDee_coul_long()]
+    call EmDee_set_coul_multimodel( md, models )
+
     call EmDee_set_kspace_model( md, EmDee_kspace_ewald( kspacePrecision ) )
     call EmDee_upload( md, "charges"//c_null_char, c_loc(Config%Charge(1)) )
 
     call EmDee_upload( md, "box"//c_null_char, c_loc(Config%Lx) )
     call EmDee_upload( md, "coordinates"//c_null_char, c_loc(Config%R(1,1)) )
-    call EmDee_random_momenta( md, kT, .true._1, seed )
+    if (Config%velocity_input) then
+      call EmDee_upload( md, "momenta"//c_null_char, c_loc(Config%P(1,1)) )
+    else
+      call EmDee_random_momenta( md, kT, .true._1, seed )
+    end if
 
-  end subroutine Configure_System
+    call EmDee_switch_model_layer(md, 3)
+
+end subroutine Configure_System
   !-------------------------------------------------------------------------------------------------
   subroutine Report( md )
     type(tEmDee), intent(in) :: md
@@ -183,7 +201,8 @@ contains
     call writeln( repeat("-",40) )
   end subroutine Report
   !-------------------------------------------------------------------------------------------------
-  character(sl) function properties()
+  character(sl) function properties(step)
+    integer, intent(in) :: step
     real(rb) :: Temp, H
     Temp = (md%Energy%Kinetic/KE_sp)*T
     H = md%Energy%Potential + md%Energy%Kinetic
@@ -229,7 +248,7 @@ contains
     read(inp,*); read(inp,*) Base
     read(inp,*); read(inp,*) configFile
     read(inp,*); read(inp,*) T
-    read(inp,*); read(inp,*) Rc, Rm
+    read(inp,*); read(inp,*) RcIn, Rc, SwitchWidth
     read(inp,*); read(inp,*) kspacePrecision
     read(inp,*); read(inp,*) seed
     read(inp,*); read(inp,*) dt
@@ -239,7 +258,6 @@ contains
     read(inp,*); read(inp,*) Nequil, Nprod
     read(inp,*); read(inp,*) method
     read(inp,*); read(inp,*) ndamp, M, nloops
-    read(inp,*); read(inp,*) rotationMode
     read(inp,*); read(inp,*) npairs
     computeRDF = npairs /= 0
     allocate( itype(npairs), jtype(npairs) )
@@ -250,21 +268,18 @@ contains
     call writeln( "Base for file names:", Base )
     call writeln( "Name of configuration file:", configFile )
     call writeln( "Temperature:", real2str(T), "K" )
-    call writeln( "Cutoff distance:", real2str(Rc), "Å" )
+    call writeln( "Internal cutoff distance:", real2str(RcIn), "Å" )
+    call writeln( "External cutoff distance:", real2str(Rc), "Å" )
+    call writeln( "Switching region width:", real2str(SwitchWidth), "Å" )
     call writeln( "Seed for random numbers:", int2str(seed) )
     call writeln( "Time step size:", real2str(dt), "fs" )
-    call writeln( "Skin size for neighbor lists:", real2str(skin), "Å" )
+    call writeln( "Skin for neighbor lists:", real2str(skin), "Å" )
     call writeln( "Interval for saving configurations:", int2str(Nconf) )
     call writeln( "Interval for printing properties:", int2str(thermo) )
     call writeln( "Number of equilibration steps:", int2str(Nequil) )
     call writeln( "Number of production steps:", int2str(Nprod) )
     call writeln( "Thermostat method:", int2str(method) )
     call writeln( "Thermostat parameters:", int2str(ndamp), int2str(M), int2str(nloops) )
-    if (rotationMode == 0) then
-      call writeln( "Rotation mode: exact solution" )
-    else
-      call writeln( "Rotation mode: Miller with", int2str(rotationMode), "respa steps" )
-    end if
     call writeln()
   end subroutine Read_Specifications
   !-------------------------------------------------------------------------------------------------
