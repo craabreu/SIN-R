@@ -1,53 +1,93 @@
 module mThermostat
 
 use mGlobal
+use mRandom
 
 implicit none
 
-type, abstract :: nhc
+type, abstract :: tThermostat
+  real(rb) :: damping
+  real(rb) :: meanFactor
+  contains
+    procedure(tThermostat_integrate), deferred :: integrate
+    procedure(tThermostat_energy),    deferred :: energy
+end type tThermostat
+
+abstract interface
+  subroutine tThermostat_integrate( me, timestep, TwoKE )
+    import :: rb, tThermostat
+    class(tThermostat), intent(inout) :: me
+    real(rb),           intent(in)    :: timestep, TwoKE
+  end subroutine tThermostat_integrate
+
+  function tThermostat_energy( me ) result( energy )
+    import :: rb, tThermostat
+    class(tThermostat), intent(in) :: me
+    real(rb)                       :: energy
+  end function tThermostat_energy
+end interface
+
+!---------------------------------------------------------------------------------------------------
+
+type, extends(tThermostat) :: nve
+contains
+  procedure :: energy => nve_energy
+  procedure :: integrate => nve_integrate
+end type nve
+
+!---------------------------------------------------------------------------------------------------
+
+type, extends(tThermostat) :: nhc
   integer,  private :: M                     !> Number of thermostats in the chain
   integer,  private :: nloops                !> Number of RESPA loops for integration
   real(rb), private :: kT                    !> Target temperature in energy units
   real(rb), private :: LKT                   !> kT times the number of degrees of freedom
-  real(rb) :: damping
-  real(rb) :: meanFactor
   real(rb), allocatable :: InvQ(:)  !> Inverse of thermostat inertial parameters
   real(rb), allocatable :: eta(:)   !> Thermostat "coordinates"
   real(rb), allocatable :: p(:)     !> Thermostat "momenta"
   contains
     procedure :: setup => nhc_setup
     procedure :: energy => nhc_energy
-    procedure(nhc_integrate), deferred :: integrate
+    procedure :: integrate => nhc_integrate
 end type
 
-abstract interface
-  elemental subroutine nhc_integrate( me, timestep, TwoKE )
-    import :: rb, nhc
-    class(nhc), intent(inout) :: me
-    real(rb),   intent(in)    :: timestep, TwoKE
-  end subroutine nhc_integrate
-end interface
 
-type, extends(nhc) :: nhc_pscaling
-  contains
-    procedure :: integrate => nhc_pscaling_integrate
-end type nhc_pscaling
+!---------------------------------------------------------------------------------------------------
 
-type, extends(nhc) :: nhc_boosting
-  contains
-    procedure :: integrate => nhc_boosting_integrate
-end type nhc_boosting
+type, extends(tThermostat) :: csvr
+  integer  :: dof
+  real(rb) :: TwoKE
+  real(rb) :: tau
+  real(rb) :: Hthermo
+  type(mt19937) :: random
+contains
+  procedure :: setup => csvr_setup
+  procedure :: energy => csvr_energy
+  procedure :: integrate => csvr_integrate
+end type csvr
 
-type, extends(nhc) :: nhc_kamberaj
-  contains
-    procedure :: integrate => nhc_kamberaj_integrate
-end type nhc_kamberaj
+!---------------------------------------------------------------------------------------------------
 
 contains
 
   !=================================================================================================
 
-  elemental subroutine nhc_setup( me, nchain, kT, tdamp, dof, nloops )
+  function nve_energy( me ) result( energy )
+    class(nve), intent(in) :: me
+    real(rb)               :: energy
+    energy = zero
+  end function nve_energy
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine nve_integrate( me, timestep, TwoKE )
+    class(nve), intent(inout) :: me
+    real(rb),   intent(in)    :: timestep, TwoKE
+  end subroutine nve_integrate
+
+  !=================================================================================================
+
+  subroutine nhc_setup( me, nchain, kT, tdamp, dof, nloops )
     class(nhc), intent(inout) :: me
     integer,    intent(in)    :: nchain
     real(rb),   intent(in)    :: kT, tdamp
@@ -64,9 +104,9 @@ contains
     me%p = zero
   end subroutine nhc_setup
 
-  !=================================================================================================
+  !-------------------------------------------------------------------------------------------------
 
-  elemental function nhc_energy( me ) result( energy )
+  function nhc_energy( me ) result( energy )
     class(nhc), intent(in) :: me
     real(rb)               :: energy
     if (me%M /= 0) then
@@ -76,22 +116,11 @@ contains
     end if
   end function nhc_energy
 
-  !=================================================================================================
+  !-------------------------------------------------------------------------------------------------
 
-  elemental real(rb) function phi( x )
-    real(rb), intent(in) :: x
-    if (abs(x) > 1E-4_rb ) then
-      phi = (one - exp(-x))/x
-    else
-      phi = one + half*x*(third*x*(one - fourth*x) - one)
-    end if
-  end function phi
-
-  !=================================================================================================
-
-  elemental subroutine nhc_pscaling_integrate( me, timestep, TwoKE )
-    class(nhc_pscaling), intent(inout) :: me
-    real(rb),            intent(in)    :: timestep, TwoKE
+  subroutine nhc_integrate( me, timestep, TwoKE )
+    class(nhc), intent(inout) :: me
+    real(rb),   intent(in)    :: timestep, TwoKE
 
     integer :: i, j
     real(rb) :: dt, dt_2, twodt, alpha, alphaSum, factor, sumFactor
@@ -125,85 +154,69 @@ contains
     contains
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
       pure subroutine integrate( me, j, alpha, G, dt )
-        class(nhc_pscaling), intent(inout) :: me
-        integer,             intent(in) :: j
-        real(rb),            intent(in) :: alpha, G, dt
+        class(nhc), intent(inout) :: me
+        integer,    intent(in) :: j
+        real(rb),   intent(in) :: alpha, G, dt
         me%p(j) = me%p(j) + (G - alpha*me%p(j))*phi(alpha*dt)*dt
         me%eta(j+1) = me%eta(j+1) + alpha*dt
       end subroutine integrate
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-  end subroutine nhc_pscaling_integrate
+      pure real(rb) function phi( x )
+        real(rb), intent(in) :: x
+        if (abs(x) > 1E-4_rb ) then
+          phi = (one - exp(-x))/x
+        else
+          phi = one + half*x*(third*x*(one - fourth*x) - one)
+        end if
+      end function phi
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+  end subroutine nhc_integrate
 
   !=================================================================================================
 
-  elemental subroutine nhc_boosting_integrate( me, timestep, TwoKE )
-    class(nhc_boosting), intent(inout) :: me
-    real(rb),            intent(in)    :: timestep, TwoKE
+  subroutine csvr_setup( me, kT, tau, dof, seed )
+    class(csvr), intent(inout) :: me
+    real(rb),    intent(in)    :: kT, tau
+    integer,     intent(in)    :: dof, seed
+    me%TwoKE = dof*kT
+    me%tau = tau
+    me%dof = dof
+    me%Hthermo = zero
+    call me % random % setup( seed )
+  end subroutine csvr_setup
 
-    integer :: i, j
-    real(rb) :: dt, dt_2
+  !-------------------------------------------------------------------------------------------------
 
-    dt = timestep/me%nloops
-    dt_2 = half*dt
-    do i = 1, me%nloops
-      me%p(me%M) = me%p(me%M) + (me%p(me%M-1)**2*me%InvQ(me%M-1) - me%kT)*dt_2
-      do j = me%M-1, 2, -1
-        call integrate( me, j, me%p(j+1)*me%InvQ(j+1), me%p(j-1)**2*me%InvQ(j-1) - me%kT, dt_2 )
-      end do
-      call integrate( me, 1, me%p(2)*me%InvQ(2), twoKE - me%LkT, dt )
-      do j = 2, me%M-1
-        call integrate( me, j, me%p(j+1)*me%InvQ(j+1), me%p(j-1)**2*me%InvQ(j-1) - me%kT, dt_2 )
-      end do
-      me%p(me%M) = me%p(me%M) + (me%p(me%M-1)**2*me%InvQ(me%M-1) - me%kT)*dt_2
-    end do
+  function csvr_energy( me ) result( energy )
+    class(csvr), intent(in) :: me
+    real(rb)                :: energy
+    energy = me%Hthermo
+  end function csvr_energy
 
-    contains
-      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-      pure subroutine integrate( me, j, alpha, G, dt )
-        class(nhc_boosting), intent(inout) :: me
-        integer,             intent(in) :: j
-        real(rb),            intent(in) :: alpha, G, dt
-        me%p(j) = me%p(j) + (G - alpha*me%p(j))*phi(alpha*dt)*dt
-        me%eta(j+1) = me%eta(j+1) + alpha*dt
-      end subroutine integrate
-      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-  end subroutine nhc_boosting_integrate
+  !-------------------------------------------------------------------------------------------------
 
-  !=================================================================================================
+  subroutine csvr_integrate( me, timestep, TwoKE )
+    class(csvr), intent(inout) :: me
+    real(rb),    intent(in)    :: timestep, TwoKE
 
-  elemental subroutine nhc_kamberaj_integrate( me, timestep, TwoKE )
-    class(nhc_kamberaj), intent(inout) :: me
-    real(rb),            intent(in)    :: timestep, TwoKE
+    real(rb) :: alphaSq, R1, x, sumRs, A, B, C
 
-    integer :: i, j
-    real(rb) :: dt, dt_2
+    R1 = me%random%normal()
+    if (mod(me%dof, 2) == 1) then
+      x = (me%dof - 1)/2
+      sumRs = 2.0*me%random%gamma(x)
+    else
+      x = (me%dof - 2)/2
+      sumRs = 2.0*me%random%gamma(x) + me%random%normal()**2
+    end if
+    A = exp(-timestep/me%tau)
+    B = 1.0 - A
+    C = me%TwoKE/(me%dof*TwoKE)
+    alphaSq = A + C*B*(R1**2 + sumRs) + 2.0*sqrt(C*B*A)*R1
+    me%damping = -half*log(alphaSq)/timestep
+    me%Hthermo = me%Hthermo + (one - alphaSq)*half*TwoKE
 
-    dt = timestep/me%nloops
-    dt_2 = half*dt
-    do i = 1, me%nloops
-      me%p(me%M) = me%p(me%M) + (me%p(me%M-1)**2*me%InvQ(me%M-1) - me%kT)*dt_2
-      do j = me%M-1, 2, -1
-        call integrate( me, j, me%p(j+1)*me%InvQ(j+1), me%p(j-1)**2*me%InvQ(j-1) - me%kT, dt_2 )
-      end do
-      call integrate( me, 1, me%p(2)*me%InvQ(2), twoKE - me%LkT, dt_2 )
-      me%eta = me%eta + me%p*me%InvQ*dt
-      call integrate( me, 1, me%p(2)*me%InvQ(2), twoKE - me%LkT, dt_2 )
-      do j = 2, me%M-1
-        call integrate( me, j, me%p(j+1)*me%InvQ(j+1), me%p(j-1)**2*me%InvQ(j-1) - me%kT, dt_2 )
-      end do
-      me%p(me%M) = me%p(me%M) + (me%p(me%M-1)**2*me%InvQ(me%M-1) - me%kT)*dt_2
-    end do
-
-    contains
-      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-      pure subroutine integrate( me, j, alpha, G, dt )
-        class(nhc_kamberaj), intent(inout) :: me
-        integer,             intent(in) :: j
-        real(rb),            intent(in) :: alpha, G, dt
-        me%p(j) = me%p(j) + (G - alpha*me%p(j))*phi(alpha*dt)*dt
-      end subroutine integrate
-      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-  end subroutine nhc_kamberaj_integrate
+  end subroutine csvr_integrate
 
   !=================================================================================================
 

@@ -32,7 +32,7 @@ real(rb) :: Volume
 ! Thermostat variables:
 integer :: method, M, ndamp, nloops
 real(rb) :: tdamp, Hthermo
-class(nhc), pointer :: thermostat
+class(tThermostat), pointer :: thermostat
 
 ! Radial distribution function variables:
 logical :: computeRDF
@@ -112,11 +112,7 @@ call stop_log
 contains
   !-------------------------------------------------------------------------------------------------
   subroutine execute_step
-    select case (method)
-      case (velocity_verlet); call Verlet_Step
-      case (nose_hoover_chain); call NHC_Step
-      case (stochastic_velocity_rescaling); call Bussi_Step
-    end select
+    call Verlet_Step
   end subroutine execute_step
   !-------------------------------------------------------------------------------------------------
   subroutine Configure_System( md )
@@ -136,7 +132,7 @@ contains
     ! Layer 1 - Bond and angle interactions only
     ! Layer 2 - Smoothed LJ and Coulomb potentials with small cutoff
     ! Layer 3 - Bond + Angle + Smoothed LJ + Ewald with large cutoff
-    call EmDee_layer_based_parameters( md, [zero, RcIn, Rc], [1, 0, 1] )
+    call EmDee_layer_based_parameters( md, RcIn, [0, 1, 0], [1, 0, 1] )
 
     ! Add bond models and bonds:
     do i = 1, Config%nBondTypes
@@ -166,13 +162,18 @@ contains
       else
         LJ = EmDee_pair_lj_cut( Config%epsilon(i)/mvv2e, Config%sigma(i) )
         models = [EmDee_pair_none(), &
-                  EmDee_smoothed(LJ, SwitchWidth), &
+                !   EmDee_smoothed(LJ, SwitchWidth), &
+                  EmDee_shifted_smoothed(LJ, SwitchWidth), &
                   EmDee_smoothed(LJ, SwitchWidth)]
         call EmDee_set_pair_multimodel( md, i, i, models, kCoul*ones )
       end if
     end do
 
-    models = [EmDee_coul_none(), EmDee_coul_shifted_smoothed(SwitchWidth), EmDee_coul_long()]
+    ! models = [EmDee_coul_none(), EmDee_coul_smoothed(SwitchWidth), EmDee_coul_long()]
+    models = [EmDee_coul_none(), &
+            !   EmDee_coul_smoothed(SwitchWidth), &
+              EmDee_coul_shifted_smoothed(SwitchWidth), &
+              EmDee_coul_long()]
     call EmDee_set_coul_multimodel( md, models )
 
     call EmDee_set_kspace_model( md, EmDee_kspace_ewald( kspacePrecision ) )
@@ -186,7 +187,7 @@ contains
       call EmDee_random_momenta( md, kT, .true._1, seed )
     end if
 
-    call EmDee_switch_model_layer(md, 3)
+    call EmDee_switch_model_layer(md, nlayers)
 
 end subroutine Configure_System
   !-------------------------------------------------------------------------------------------------
@@ -203,10 +204,9 @@ end subroutine Configure_System
   !-------------------------------------------------------------------------------------------------
   character(sl) function properties(step)
     integer, intent(in) :: step
-    real(rb) :: Temp, H
+    real(rb) :: Temp, TotalEnergy
     Temp = (md%Energy%Kinetic/KE_sp)*T
-    H = md%Energy%Potential + md%Energy%Kinetic
-    if (method == nose_hoover_chain) Hthermo = thermostat%energy()
+    TotalEnergy = md%Energy%Potential + md%Energy%Kinetic
     properties = trim(adjustl(int2str(step))) // " " // &
                  join(real2str([ Temp, &
                                  Pconv*((dof-3)*kB*Temp/3 + md%Virial/3.0_rb)/Volume, &
@@ -216,9 +216,9 @@ end subroutine Configure_System
                                         md%Energy%Bond, &
                                         md%Energy%Angle, &
                                         md%Energy%Potential, &
-                                        H, &
+                                        TotalEnergy, &
                                         md%Virial, &
-                                        H + Hthermo]]))
+                                        TotalEnergy + thermostat%energy()]]))
   end function properties
   !-------------------------------------------------------------------------------------------------
   subroutine Get_Command_Line_Args( threads, filename )
@@ -297,60 +297,38 @@ end subroutine Configure_System
     KE_sp = half*dof*kT
     Volume = Lx*Ly*Lz
     call random % setup( seed )
-    if (all(method /= [velocity_verlet, nose_hoover_chain, stochastic_velocity_rescaling])) then
-        call error("Specified method not implemented")
-    end if
-    if (method == nose_hoover_chain) then
-        allocate( nhc_pscaling :: thermostat )
-        call thermostat % setup( M, kT, ndamp*dt, dof, nloops )
-    end if
+
+    select case (method)
+      case (velocity_verlet)
+        allocate( nve :: thermostat )
+      case (nose_hoover_chain)
+        allocate( nhc :: thermostat )
+      case (stochastic_velocity_rescaling)
+        allocate( csvr :: thermostat )
+      case default
+        call error("Specified thermostat method not implemented")
+    end select
+
+    select type(thermo => thermostat)
+      class is (nhc)
+        call thermo % setup( M, kT, ndamp*dt, dof, nloops )
+      class is (csvr)
+        call thermo % setup( kT, ndamp*dt, dof, seed )
+    end select
+
     tdamp = ndamp*dt
     Hthermo = 0.0_rb
   end subroutine Setup_Simulation
   !-------------------------------------------------------------------------------------------------
   subroutine Verlet_Step
-      call EmDee_boost( md, one, zero, dt_2 )
-      call EmDee_displace( md, one, zero, dt )
-      call EmDee_boost( md, one, zero, dt_2 )
+    call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
+    call EmDee_boost( md, zero, thermostat%damping, dt_2 )
+    call EmDee_boost( md, one, zero, dt_2 )
+    call EmDee_displace( md, one, zero, dt )
+    call EmDee_boost( md, one, zero, dt_2 )
+    call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
+    call EmDee_boost( md, zero, thermostat%damping, dt_2 )
   end subroutine Verlet_Step
-  !-------------------------------------------------------------------------------------------------
-  function BussiScale(KE, KE_sp, dof, tau, dt) result( alphaSq )
-    real(rb), intent(in) :: KE, KE_sp, tau, dt
-    integer,  intent(in) :: dof
-    real(rb)             :: alphaSq
-    real(rb) :: R1, x, sumRs, A, B, C
-    R1 = random%normal()
-    if (mod(dof, 2) == 1) then
-      x = (dof - 1)/2
-      sumRs = 2.0*random%gamma(x)
-    else
-      x = (dof - 2)/2
-      sumRs = 2.0*random%gamma(x) + random%normal()**2
-    end if
-    A = exp(-dt/tau)
-    B = 1.0 - A
-    C = KE_sp/(dof*KE)
-    alphaSq = A + C*B*(R1**2 + sumRs) + 2.0*sqrt(C*B*A)*R1
-  end function BussiScale
-  !-------------------------------------------------------------------------------------------------
-  subroutine Bussi_Step
-    real(rb) :: factor
-    factor = BussiScale( md%Energy%Kinetic, KE_sp, dof, tdamp, dt_2 )
-    Hthermo = Hthermo + (1.0 - factor)*md%Energy%Kinetic
-    call EmDee_boost( md, zero, -log(factor)/dt, dt_2 )
-    call Verlet_Step
-    factor = BussiScale( md%Energy%Kinetic, KE_sp, dof, tdamp, dt_2 )
-    Hthermo = Hthermo + (1.0 - factor)*md%Energy%Kinetic
-    call EmDee_boost( md, zero, -log(factor)/dt, dt_2 )
-  end subroutine Bussi_Step
-  !-------------------------------------------------------------------------------------------------
-  subroutine NHC_Step
-      call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
-      call EmDee_boost( md, zero, thermostat%damping, dt_2 )
-      call Verlet_Step
-      call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
-      call EmDee_boost( md, zero, thermostat%damping, dt_2 )
-  end subroutine NHC_Step
 !---------------------------------------------------------------------------------------------------
   subroutine rdf_save( file )
     character(*), intent(in) :: file

@@ -19,9 +19,9 @@ water.lmp
 [Interval for displaying properties]
 10
 [Numbers of equilibration and production steps]
-0 0
+0 1000
 [Thermostatting method: 0) NVE; 1) NHC; 2) Bussi]
-0
+2
 [Thermostat parameters: ndamp, nchain, nloops]
 1 6 10
 [Compute rdf: number of pairs]

@@ -22,7 +22,10 @@ lib: $(LIBFILE)
 $(LIBFILE): $(OBJS)
 	ar -cr $(LIBFILE) $(OBJS)
 
-%.o: %.f90 mGlobal.o
+%.o: %.f90 mGlobal.o mRandom.o
+	$(FORT) $(FLAGS) -c -o $@ $<
+
+mRandom.o: mRandom.f90
 	$(FORT) $(FLAGS) -c -o $@ $<
 
 mGlobal.o: mGlobal.f90
@@ -33,4 +36,3 @@ clean:
 	rm -f *.mod
 	rm -f $(LIBFILE)
 	rm -rf html/
-
