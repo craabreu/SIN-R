@@ -10,8 +10,10 @@ water.lmp
 0.00023
 [Seed for random numbers]
 2345
-[Integration time step (fs)]
-0.1
+[Largest integration time step (fs)]
+2.0
+[Number of RESPA loops for each one of three layers]
+2 2 1
 [Skin distance for neighbor lists (Å)]
 2
 [Interval for saving configurations]
@@ -19,9 +21,9 @@ water.lmp
 [Interval for displaying properties]
 10
 [Numbers of equilibration and production steps]
-0 1000
+500 500
 [Thermostatting method: 0) NVE; 1) NHC; 2) Bussi]
-2
+0
 [Thermostat parameters: ndamp, nchain, nloops]
 1 6 10
 [Compute rdf: number of pairs]

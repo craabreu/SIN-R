@@ -83,6 +83,7 @@ contains
   subroutine nve_integrate( me, timestep, TwoKE )
     class(nve), intent(inout) :: me
     real(rb),   intent(in)    :: timestep, TwoKE
+    me%damping = zero
   end subroutine nve_integrate
 
   !=================================================================================================

@@ -149,7 +149,7 @@ contains
       else if ((narg == 1).and.(arg(1) == "Atoms")) then
         associate( N => me % natoms )
           allocate( me%Mol(N), me%Type(N), me%Charge(N) )
-          allocate(me%ntype(me%ntypes), source = 0) !Added by Ana
+          allocate( me%ntype(me%ntypes), source = 0 ) !Added by Ana
           allocate( me%R(3,N), me%F(3,N), me%P(3,N) )
           me%Rx => me%R(1,:)
           me%Ry => me%R(2,:)

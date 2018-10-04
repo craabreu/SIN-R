@@ -21,17 +21,20 @@ integer, parameter :: velocity_verlet = 0, &
                       stochastic_velocity_rescaling = 2
 
 ! Simulation specifications:
+integer  :: seed, Nconf, thermo, Nequil, Nprod
+real(rb) :: T, RcIn, Rc, SwitchWidth, dt, skin, kspacePrecision
 character(sl) :: Base
-integer       :: N, seed, Nconf, thermo, Nequil, Nprod
-real(rb)      :: T, RcIn, Rc, SwitchWidth, dt, skin, kspacePrecision
+
+! RESPA-related variables:
+integer       :: RespaN(3)
 
 ! System properties:
-integer :: dof
+integer  :: dof
 real(rb) :: Volume
 
 ! Thermostat variables:
-integer :: method, M, ndamp, nloops
-real(rb) :: tdamp, Hthermo
+integer  :: method, M, ndamp, nloops
+real(rb) :: tdamp
 class(tThermostat), pointer :: thermostat
 
 ! Radial distribution function variables:
@@ -41,12 +44,12 @@ real(rb), allocatable :: gr(:,:), rdf(:,:)
 integer , allocatable :: itype(:), jtype(:)
 
 ! Other variables:
-integer :: step
+integer  :: step
 real(rb) :: dt_2, dt_4, KE_sp, kT
 character(256) :: filename, configFile
 
 integer :: threads
-type(tEmDee) :: md
+type(tEmDee)  :: md
 type(mt19937) :: random
 type(c_ptr), allocatable :: model(:)
 type(c_ptr), allocatable :: bond_model(:)
@@ -112,7 +115,8 @@ call stop_log
 contains
   !-------------------------------------------------------------------------------------------------
   subroutine execute_step
-    call Verlet_Step
+!    call Verlet_Step
+    call RESPA_Step( dt, 3 )
   end subroutine execute_step
   !-------------------------------------------------------------------------------------------------
   subroutine Configure_System( md )
@@ -177,8 +181,8 @@ contains
     call EmDee_set_coul_multimodel( md, models )
 
     call EmDee_set_kspace_model( md, EmDee_kspace_ewald( kspacePrecision ) )
-    call EmDee_upload( md, "charges"//c_null_char, c_loc(Config%Charge(1)) )
 
+    call EmDee_upload( md, "charges"//c_null_char, c_loc(Config%Charge(1)) )
     call EmDee_upload( md, "box"//c_null_char, c_loc(Config%Lx) )
     call EmDee_upload( md, "coordinates"//c_null_char, c_loc(Config%R(1,1)) )
     if (Config%velocity_input) then
@@ -187,7 +191,8 @@ contains
       call EmDee_random_momenta( md, kT, .true._1, seed )
     end if
 
-    call EmDee_switch_model_layer(md, nlayers)
+    call EmDee_switch_model_layer( md, nlayers )
+    call discount_forces()
 
 end subroutine Configure_System
   !-------------------------------------------------------------------------------------------------
@@ -205,12 +210,12 @@ end subroutine Configure_System
   character(sl) function properties(step)
     integer, intent(in) :: step
     real(rb) :: Temp, TotalEnergy
-    Temp = (md%Energy%Kinetic/KE_sp)*T
-    TotalEnergy = md%Energy%Potential + md%Energy%Kinetic
+    Temp = (md%Kinetic%Total/KE_sp)*T
+    TotalEnergy = md%Energy%Potential + md%Kinetic%Total
     properties = trim(adjustl(int2str(step))) // " " // &
                  join(real2str([ Temp, &
                                  Pconv*((dof-3)*kB*Temp/3 + md%Virial/3.0_rb)/Volume, &
-                                 mvv2e*[md%Energy%Kinetic, &
+                                 mvv2e*[md%Kinetic%Total, &
                                         md%Energy%Dispersion, &
                                         md%Energy%Coulomb, &
                                         md%Energy%Bond, &
@@ -240,7 +245,6 @@ end subroutine Configure_System
     end if
     filename = line
   end subroutine Get_Command_Line_Args
-  !-------------------------------------------------------------------------------------------------
   subroutine Read_Specifications( file )
     character(*), intent(in) :: file
     integer :: inp, i
@@ -252,6 +256,7 @@ end subroutine Configure_System
     read(inp,*); read(inp,*) kspacePrecision
     read(inp,*); read(inp,*) seed
     read(inp,*); read(inp,*) dt
+    read(inp,*); read(inp,*) RespaN
     read(inp,*); read(inp,*) skin
     read(inp,*); read(inp,*) Nconf
     read(inp,*); read(inp,*) thermo
@@ -273,6 +278,7 @@ end subroutine Configure_System
     call writeln( "Switching region width:", real2str(SwitchWidth), "Å" )
     call writeln( "Seed for random numbers:", int2str(seed) )
     call writeln( "Time step size:", real2str(dt), "fs" )
+    call writeln( "Numbers of RESPA loops: ", join(int2str(RespaN)) )
     call writeln( "Skin for neighbor lists:", real2str(skin), "Å" )
     call writeln( "Interval for saving configurations:", int2str(Nconf) )
     call writeln( "Interval for printing properties:", int2str(thermo) )
@@ -284,18 +290,17 @@ end subroutine Configure_System
   end subroutine Read_Specifications
   !-------------------------------------------------------------------------------------------------
   subroutine Setup_Simulation
-    real(rb) :: Lx, Ly, Lz
-    N = Config % natoms
-    Lx = Config % Lx
-    Ly = Config % Ly
-    Lz = Config % Lz
-    if (Rc+skin >= half*min(Lx,Ly,Lz)) call error( "minimum image convention failed!" )
+    real(rb) :: L(3)
+    L = [Config % Lx, Config % Ly, Config % Lz]
+    if (Rc+skin >= half*minval(L)) call error( "minimum image convention failed!" )
     dt_2 = half*dt
     dt_4 = 0.25_rb*dt
-    dof = 3*N - 3
+    dof = 3*Config%natoms - 3
     kT = kB*T
     KE_sp = half*dof*kT
-    Volume = Lx*Ly*Lz
+    Volume = product(L)
+    tdamp = ndamp*dt
+
     call random % setup( seed )
 
     select case (method)
@@ -311,22 +316,20 @@ end subroutine Configure_System
 
     select type(thermo => thermostat)
       class is (nhc)
-        call thermo % setup( M, kT, ndamp*dt, dof, nloops )
+        call thermo % setup( M, kT, tdamp, dof, nloops )
       class is (csvr)
-        call thermo % setup( kT, ndamp*dt, dof, seed )
+        call thermo % setup( kT, tdamp, dof, seed )
     end select
 
-    tdamp = ndamp*dt
-    Hthermo = 0.0_rb
   end subroutine Setup_Simulation
   !-------------------------------------------------------------------------------------------------
   subroutine Verlet_Step
-    call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
+    call thermostat % integrate( dt_2, two*md%Kinetic%Total )
     call EmDee_boost( md, zero, thermostat%damping, dt_2 )
     call EmDee_boost( md, one, zero, dt_2 )
     call EmDee_displace( md, one, zero, dt )
     call EmDee_boost( md, one, zero, dt_2 )
-    call thermostat % integrate( dt_2, two*md%Energy%Kinetic )
+    call thermostat % integrate( dt_2, two*md%Kinetic%Total )
     call EmDee_boost( md, zero, thermostat%damping, dt_2 )
   end subroutine Verlet_Step
 !---------------------------------------------------------------------------------------------------
@@ -346,5 +349,45 @@ end subroutine Configure_System
       write(unit,*) (i - 0.5)*Rc/bins, gr(i,:)/real(counter,rb)
     end do
   end subroutine rdf_save
+  !-------------------------------------------------------------------------------------------------
+  subroutine discount_forces()
+    integer :: layer
+    real(rb), target :: F(3,Config%natoms)
+    call EmDee_download( md, "forces"//c_null_char, c_loc(Config%F(1,1)) )
+    do layer = 1, 2
+      call EmDee_switch_model_layer( md, layer )
+      call EmDee_download( md, "forces"//c_null_char, c_loc(F(1,1)) )
+      Config%F = Config%F - F
+    end do
+    call EmDee_switch_model_layer( md, 3 )
+    call EmDee_upload( md, "forces"//c_null_char, c_loc(Config%F(1,1)) )
+  end subroutine discount_forces
+  !-------------------------------------------------------------------------------------------------
+  subroutine RESPA_Step( timestep, layer )
+    real(rb), intent(in) :: timestep
+    integer,  intent(in) :: layer
+
+    integer :: step
+    real(rb) :: dt, dt_2
+
+    dt = timestep/RespaN(layer)
+    dt_2 = half*dt
+    call EmDee_switch_model_layer( md, layer )
+    do step = 1, RespaN(layer)
+      call EmDee_boost( md, one, zero, dt_2 )
+      if (layer == 1) then
+        call EmDee_displace( md, one, zero, dt )
+!        call thermostat % integrate( dt, two*md%Energy%Kinetic )
+!        call EmDee_boost( md, zero, thermostat%damping, dt )
+!        call EmDee_displace( md, one, zero, dt_2 )
+      else
+        call RESPA_Step( dt, layer-1 )
+        call EmDee_switch_model_layer( md, layer )
+      end if
+      call EmDee_compute_forces( md )
+      if (layer == 3) call discount_forces()
+      call EmDee_boost( md, one, zero, dt_2 )
+    end do
+  end subroutine RESPA_Step
 !===================================================================================================
 end program lj_nvt
