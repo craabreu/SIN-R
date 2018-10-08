@@ -11,10 +11,10 @@ use EmDee
 
 implicit none
 
-real(rb), parameter :: mvv2e = 2390.057364_rb         ! Da*AÂ²/fsÂ² to kcal/mol
-real(rb), parameter :: kB = 8.31451E-7_rb             ! Boltzmann constant in Da*AÂ²/(fsÂ²*K)
-real(rb), parameter :: Pconv = 1.6388244954E+8_rb     ! Da/(A*fsÂ²) to atm
-real(rb), parameter :: kCoul = 0.13893545755135628_rb ! Coulomb constant in Da*AÂ³/(fs*e)Â²
+real(rb), parameter :: mvv2e = 2390.057364_rb         ! Da*Å²/fs² to kcal/mol
+real(rb), parameter :: kB = 8.31451E-7_rb             ! Boltzmann constant in Da*Å²/(fs²*K)
+real(rb), parameter :: Pconv = 1.6388244954E+8_rb     ! Da/(Å*fs²) to atm
+real(rb), parameter :: kCoul = 0.138935456_rb         ! Coulomb constant in Da*Å³/(fs*e)²
 
 integer, parameter :: velocity_verlet = 0, &
                       nose_hoover_chain = 1, &
@@ -136,7 +136,7 @@ contains
     ! Layer 1 - Bond and angle interactions only
     ! Layer 2 - Smoothed LJ and Coulomb potentials with small cutoff
     ! Layer 3 - Bond + Angle + Smoothed LJ + Ewald with large cutoff
-    call EmDee_layer_based_parameters( md, RcIn, [0, 1, 0], [1, 0, 1] )
+    call EmDee_layer_based_parameters( md, RcIn, Apply = [0, 1, 0], Bonded = [1, 0, 1] )
 
     ! Add bond models and bonds:
     do i = 1, Config%nBondTypes
@@ -165,19 +165,18 @@ contains
         call EmDee_set_pair_model( md, i, i, EmDee_pair_none(), kCoul )
       else
         LJ = EmDee_pair_lj_cut( Config%epsilon(i)/mvv2e, Config%sigma(i) )
-        models = [EmDee_pair_none(), &
-                !   EmDee_smoothed(LJ, SwitchWidth), &
-                  EmDee_shifted_smoothed(LJ, SwitchWidth), &
-                  EmDee_smoothed(LJ, SwitchWidth)]
+        models = [ EmDee_pair_none(),                         &
+!                   EmDee_smoothed( LJ, SwitchWidth ),         &
+                   EmDee_shifted_smoothed( LJ, SwitchWidth ), &
+                   EmDee_smoothed( LJ, SwitchWidth )          ]
         call EmDee_set_pair_multimodel( md, i, i, models, kCoul*ones )
       end if
     end do
 
-    ! models = [EmDee_coul_none(), EmDee_coul_smoothed(SwitchWidth), EmDee_coul_long()]
-    models = [EmDee_coul_none(), &
-            !   EmDee_coul_smoothed(SwitchWidth), &
-              EmDee_coul_shifted_smoothed(SwitchWidth), &
-              EmDee_coul_long()]
+    models = [ EmDee_coul_none(),                                        &
+!               EmDee_smoothed( EmDee_coul_cut(), SwitchWidth ),          &
+               EmDee_shifted_smoothed( EmDee_coul_cut(), SwitchWidth ),  &
+               EmDee_coul_long()                                         ]
     call EmDee_set_coul_multimodel( md, models )
 
     call EmDee_set_kspace_model( md, EmDee_kspace_ewald( kspacePrecision ) )
@@ -214,7 +213,7 @@ end subroutine Configure_System
     TotalEnergy = md%Energy%Potential + md%Kinetic%Total
     properties = trim(adjustl(int2str(step))) // " " // &
                  join(real2str([ Temp, &
-                                 Pconv*((dof-3)*kB*Temp/3 + md%Virial/3.0_rb)/Volume, &
+                                 Pconv*((dof-3)*kB*Temp/3 + md%Virial%Total/3.0_rb)/Volume, &
                                  mvv2e*[md%Kinetic%Total, &
                                         md%Energy%Dispersion, &
                                         md%Energy%Coulomb, &
@@ -222,7 +221,7 @@ end subroutine Configure_System
                                         md%Energy%Angle, &
                                         md%Energy%Potential, &
                                         TotalEnergy, &
-                                        md%Virial, &
+                                        md%Virial%Total, &
                                         TotalEnergy + thermostat%energy()]]))
   end function properties
   !-------------------------------------------------------------------------------------------------
@@ -245,6 +244,7 @@ end subroutine Configure_System
     end if
     filename = line
   end subroutine Get_Command_Line_Args
+  !-------------------------------------------------------------------------------------------------
   subroutine Read_Specifications( file )
     character(*), intent(in) :: file
     integer :: inp, i
@@ -273,13 +273,13 @@ end subroutine Configure_System
     call writeln( "Base for file names:", Base )
     call writeln( "Name of configuration file:", configFile )
     call writeln( "Temperature:", real2str(T), "K" )
-    call writeln( "Internal cutoff distance:", real2str(RcIn), "Ã…" )
-    call writeln( "External cutoff distance:", real2str(Rc), "Ã…" )
-    call writeln( "Switching region width:", real2str(SwitchWidth), "Ã…" )
+    call writeln( "Internal cutoff distance:", real2str(RcIn), "Å" )
+    call writeln( "External cutoff distance:", real2str(Rc), "Å" )
+    call writeln( "Switching region width:", real2str(SwitchWidth), "Å" )
     call writeln( "Seed for random numbers:", int2str(seed) )
     call writeln( "Time step size:", real2str(dt), "fs" )
     call writeln( "Numbers of RESPA loops: ", join(int2str(RespaN)) )
-    call writeln( "Skin for neighbor lists:", real2str(skin), "Ã…" )
+    call writeln( "Skin for neighbor lists:", real2str(skin), "Å" )
     call writeln( "Interval for saving configurations:", int2str(Nconf) )
     call writeln( "Interval for printing properties:", int2str(thermo) )
     call writeln( "Number of equilibration steps:", int2str(Nequil) )
@@ -372,22 +372,21 @@ end subroutine Configure_System
 
     dt = timestep/RespaN(layer)
     dt_2 = half*dt
-    call EmDee_switch_model_layer( md, layer )
     do step = 1, RespaN(layer)
+      call EmDee_switch_model_layer( md, layer )
       call EmDee_boost( md, one, zero, dt_2 )
       if (layer == 1) then
-        call EmDee_displace( md, one, zero, dt )
-!        call thermostat % integrate( dt, two*md%Energy%Kinetic )
-!        call EmDee_boost( md, zero, thermostat%damping, dt )
-!        call EmDee_displace( md, one, zero, dt_2 )
+        call EmDee_displace( md, one, zero, dt_2 )
+        call thermostat % integrate( dt, two*md%Kinetic%Total )
+        call EmDee_boost( md, zero, thermostat%damping, dt )
+        call EmDee_displace( md, one, zero, dt_2 )
       else
         call RESPA_Step( dt, layer-1 )
-        call EmDee_switch_model_layer( md, layer )
       end if
-      call EmDee_compute_forces( md )
+      call EmDee_switch_model_layer( md, layer )
       if (layer == 3) call discount_forces()
       call EmDee_boost( md, one, zero, dt_2 )
     end do
-  end subroutine RESPA_Step
+  end subroutine
 !===================================================================================================
 end program lj_nvt
