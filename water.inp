@@ -13,9 +13,9 @@ T
 [Seed for random numbers]
 2345
 [Largest integration time step (fs)]
-5.0
+2.0
 [Number of RESPA loops for each one of three layers]
-5 5 1
+5 2 1
 [Skin distance for neighbor lists (Å)]
 2
 [Interval for saving configurations]
