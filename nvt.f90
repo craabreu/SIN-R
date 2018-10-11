@@ -32,7 +32,10 @@ integer  :: RespaN(3)
 ! System properties:
 integer  :: dof
 real(rb) :: Volume
-real(rb), pointer :: F(:,:,:)
+
+! SIN(R) variables:
+real(rb), allocatable :: invM(:,:)
+real(rb), pointer     :: P(:,:), F(:,:,:)
 
 ! Thermostat variables:
 integer  :: method, M, ndamp, nloops
@@ -127,7 +130,7 @@ contains
     integer, parameter :: ones(nlayers) = 1
     integer :: i
     real(rb) :: theta0
-    type(c_ptr) :: LJ, models(nlayers)
+    type(c_ptr) :: LJ, models(nlayers), address
 
     ! Initialize a system with 3 model layers:
     md = EmDee_system( threads, nlayers, Rc, skin, Config%natoms, &
@@ -193,10 +196,17 @@ contains
       call EmDee_random_momenta( md, kT, .true._1, seed )
     end if
 
-    call c_f_pointer( EmDee_memory_address( md, "layerForces"//c_null_char ), &
-                      F, [3, Config%natoms, nlayers] )
-    
+    address = EmDee_memory_address( md, "momenta"//c_null_char )
+    call c_f_pointer( address, P, [3, Config%natoms] )
+
+    address = EmDee_memory_address( md, "layerForces"//c_null_char )
+    call c_f_pointer( address, F, [3, Config%natoms, nlayers] )
+
+    allocate( invM(3,Config%natoms) )
+    forall (i=1:Config%natoms) invM(:,i) = Config%invMass(Config%Type(i))
+
     call EmDee_switch_model_layer( md, nlayers )
+    call EmDee_compute_forces( md )
     call discount_forces()
 
 end subroutine Configure_System
@@ -214,13 +224,14 @@ end subroutine Configure_System
   !-------------------------------------------------------------------------------------------------
   character(sl) function properties(step)
     integer, intent(in) :: step
-    real(rb) :: Temp, TotalEnergy
-    Temp = (md%Kinetic%Total/KE_sp)*T
-    TotalEnergy = md%Energy%Potential + md%Kinetic%Total
+    real(rb) :: Temp, kineticEnergy, TotalEnergy
+    kineticEnergy = half*sum(invM*P**2)
+    Temp = (kineticEnergy/KE_sp)*T
+    TotalEnergy = md%Energy%Potential + kineticEnergy
     properties = trim(adjustl(int2str(step))) // " " // &
                  join(real2str([ Temp, &
                                  Pconv*((dof-3)*kB*Temp/3 + md%Virial%Total/3.0_rb)/Volume, &
-                                 mvv2e*[md%Kinetic%Total, &
+                                 mvv2e*[kineticEnergy, &
                                         md%Energy%Dispersion, &
                                         md%Energy%Coulomb, &
                                         md%Energy%Bond, &
@@ -329,16 +340,6 @@ end subroutine Configure_System
     end select
 
   end subroutine Setup_Simulation
-  !-------------------------------------------------------------------------------------------------
-  subroutine Verlet_Step
-    call thermostat % integrate( dt_2, two*md%Kinetic%Total )
-    call EmDee_boost( md, zero, thermostat%damping, dt_2 )
-    call EmDee_boost( md, one, zero, dt_2 )
-    call EmDee_displace( md, one, zero, dt )
-    call EmDee_boost( md, one, zero, dt_2 )
-    call thermostat % integrate( dt_2, two*md%Kinetic%Total )
-    call EmDee_boost( md, zero, thermostat%damping, dt_2 )
-  end subroutine Verlet_Step
 !---------------------------------------------------------------------------------------------------
   subroutine rdf_save( file )
     character(*), intent(in) :: file
@@ -358,7 +359,6 @@ end subroutine Configure_System
   end subroutine rdf_save
   !-------------------------------------------------------------------------------------------------
   subroutine discount_forces()
-    call EmDee_compute_forces( md )
     F(:,:,3) = F(:,:,3) - (F(:,:,1) + F(:,:,2))
   end subroutine discount_forces
   !-------------------------------------------------------------------------------------------------
@@ -373,18 +373,19 @@ end subroutine Configure_System
     dt_2 = half*dt
     do step = 1, RespaN(layer)
       call EmDee_switch_model_layer( md, layer )
-      call EmDee_boost( md, one, zero, dt_2 )
+      P = P + F(:,:,layer)*dt_2
       if (layer == 1) then
         call EmDee_displace( md, one, zero, dt_2 )
-        call thermostat % integrate( dt, two*md%Kinetic%Total )
-        call EmDee_boost( md, zero, thermostat%damping, dt )
+        call thermostat % integrate( dt, sum(invM*P*P) )
+        P = P*exp(-thermostat%damping*dt)
         call EmDee_displace( md, one, zero, dt_2 )
       else
         call RESPA_Step( dt, layer-1 )
       end if
       call EmDee_switch_model_layer( md, layer )
+      call EmDee_compute_forces( md )
       if (layer == 3) call discount_forces()
-      call EmDee_boost( md, one, zero, dt_2 )
+      P = P + F(:,:,layer)*dt_2
     end do
 
   end subroutine
