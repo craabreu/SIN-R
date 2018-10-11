@@ -1,19 +1,21 @@
 [Base for file names]
 water
 [Initial configuration file]
-q-SPC-FW.lmp
+q-SPC-FW.lmp 
 [Temperature (K)]
 298
 [Internal cut-off, External cut-off, and switching width (Å)]
-6.0 10.0 1.0
+6.0 10.0 2.0
+[Shift potential prior to smoothing it? (T/F)]
+T
 [Precision of reciprocal space calculations]
 0.00023
 [Seed for random numbers]
 2345
 [Largest integration time step (fs)]
-2.0
+5.0
 [Number of RESPA loops for each one of three layers]
-4 2 1
+5 5 1
 [Skin distance for neighbor lists (Å)]
 2
 [Interval for saving configurations]
@@ -23,7 +25,7 @@ q-SPC-FW.lmp
 [Numbers of equilibration and production steps]
 500 500
 [Thermostatting method: 0) NVE; 1) NHC; 2) Bussi]
-0
+1
 [Thermostat parameters: ndamp, nchain, nloops]
 1 6 10
 [Compute rdf: number of pairs]

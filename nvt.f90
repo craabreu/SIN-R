@@ -11,10 +11,10 @@ use EmDee
 
 implicit none
 
-real(rb), parameter :: mvv2e = 2390.057364_rb         ! Da*Å²/fs² to kcal/mol
-real(rb), parameter :: kB = 8.31451E-7_rb             ! Boltzmann constant in Da*Å²/(fs²*K)
-real(rb), parameter :: Pconv = 1.6388244954E+8_rb     ! Da/(Å*fs²) to atm
-real(rb), parameter :: kCoul = 0.138935456_rb         ! Coulomb constant in Da*Å³/(fs*e)²
+real(rb), parameter :: mvv2e = 2390.057364_rb         ! Da*A^2/fs^2 to kcal/mol
+real(rb), parameter :: kB = 8.31451E-7_rb             ! Boltzmann constant in Da*A^2/(fs^2*K)
+real(rb), parameter :: Pconv = 1.6388244954E+8_rb     ! Da/(A*fs^2) to atm
+real(rb), parameter :: kCoul = 0.138935456_rb         ! Coulomb constant in Da*A^3/(fs*e)^2
 
 integer, parameter :: velocity_verlet = 0, &
                       nose_hoover_chain = 1, &
@@ -23,6 +23,7 @@ integer, parameter :: velocity_verlet = 0, &
 ! Simulation specifications:
 integer  :: seed, Nconf, thermo, Nequil, Nprod
 real(rb) :: T, RcIn, Rc, SwitchWidth, dt, skin, kspacePrecision
+logical  :: shift
 character(sl) :: Base
 
 ! RESPA-related variables:
@@ -165,18 +166,20 @@ contains
         call EmDee_set_pair_model( md, i, i, EmDee_pair_none(), kCoul )
       else
         LJ = EmDee_pair_lj_cut( Config%epsilon(i)/mvv2e, Config%sigma(i) )
-        models = [ EmDee_pair_none(),                         &
-!                   EmDee_smoothed( LJ, SwitchWidth ),         &
-                   EmDee_shifted_smoothed( LJ, SwitchWidth ), &
-                   EmDee_smoothed( LJ, SwitchWidth )          ]
+        models = [ EmDee_pair_none(),                                &
+                   merge( EmDee_shifted_smoothed( LJ, SwitchWidth ), &
+                          EmDee_smoothed( LJ, SwitchWidth ),         &
+                          shift ),                                   &
+                   EmDee_smoothed( LJ, SwitchWidth )                 ]
         call EmDee_set_pair_multimodel( md, i, i, models, kCoul*ones )
       end if
     end do
 
-    models = [ EmDee_coul_none(),                                        &
-!               EmDee_smoothed( EmDee_coul_cut(), SwitchWidth ),          &
-               EmDee_shifted_smoothed( EmDee_coul_cut(), SwitchWidth ),  &
-               EmDee_coul_long()                                         ]
+    models = [ EmDee_coul_none(),                                               &
+               merge( EmDee_shifted_smoothed( EmDee_coul_cut(), SwitchWidth ),  &
+                      EmDee_smoothed( EmDee_coul_cut(), SwitchWidth ),          &
+                      shift ),                                                  &
+               EmDee_coul_long()                                                ]
     call EmDee_set_coul_multimodel( md, models )
 
     call EmDee_set_kspace_model( md, EmDee_kspace_ewald( kspacePrecision ) )
@@ -253,6 +256,7 @@ end subroutine Configure_System
     read(inp,*); read(inp,*) configFile
     read(inp,*); read(inp,*) T
     read(inp,*); read(inp,*) RcIn, Rc, SwitchWidth
+    read(inp,*); read(inp,*) shift
     read(inp,*); read(inp,*) kspacePrecision
     read(inp,*); read(inp,*) seed
     read(inp,*); read(inp,*) dt
@@ -273,13 +277,13 @@ end subroutine Configure_System
     call writeln( "Base for file names:", Base )
     call writeln( "Name of configuration file:", configFile )
     call writeln( "Temperature:", real2str(T), "K" )
-    call writeln( "Internal cutoff distance:", real2str(RcIn), "Å" )
-    call writeln( "External cutoff distance:", real2str(Rc), "Å" )
-    call writeln( "Switching region width:", real2str(SwitchWidth), "Å" )
+    call writeln( "Internal cutoff distance:", real2str(RcIn), "A" )
+    call writeln( "External cutoff distance:", real2str(Rc), "A" )
+    call writeln( "Switching region width:", real2str(SwitchWidth), "A" )
     call writeln( "Seed for random numbers:", int2str(seed) )
     call writeln( "Time step size:", real2str(dt), "fs" )
     call writeln( "Numbers of RESPA loops: ", join(int2str(RespaN)) )
-    call writeln( "Skin for neighbor lists:", real2str(skin), "Å" )
+    call writeln( "Skin for neighbor lists:", real2str(skin), "A" )
     call writeln( "Interval for saving configurations:", int2str(Nconf) )
     call writeln( "Interval for printing properties:", int2str(thermo) )
     call writeln( "Number of equilibration steps:", int2str(Nequil) )
