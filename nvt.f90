@@ -38,8 +38,8 @@ real(rb) :: Volume
 real(rb), pointer :: F(:,:,:)
 
 ! Thermostat variables:
-integer  :: method, M, ndamp, nloops
-real(rb) :: tdamp
+integer  :: method, M, nloops
+real(rb) :: tau, gamma
 class(tThermostat), pointer :: thermostat
 
 ! Radial distribution function variables:
@@ -80,7 +80,7 @@ call writeln( titles )
 call writeln( properties(0) )
 do step = 1, NEquil
   md%Options%Compute = mod(step,thermo) == 0
-  call execute_step
+  call RESPA_Step( dt, 3 )
   if (md%Options%Compute) call writeln( properties(step) )
 end do
 call writeln( "Loop time of", real2str(md%Time%Total), "s." )
@@ -100,7 +100,7 @@ end if
 
 do step = NEquil+1, NEquil+NProd
   md%Options%Compute = mod(step,thermo) == 0
-  call execute_step
+  call RESPA_Step( dt, 3 )
   if (md%Options%Compute) call writeln( properties(step) )
   if (mod(step,Nconf)==0) call Config % Save_XYZ( trim(Base)//".xyz", append = .true. )
   if (computeRDF .and. (mod(step, nevery) == 0)) then
@@ -118,7 +118,11 @@ call stop_log
 contains
   !-------------------------------------------------------------------------------------------------
   subroutine execute_step
-    call RESPA_Step( dt, 3 )
+    if (method == stochastic_isokinetic_nh_respa) then
+      call SINR_Step( dt, 3 )
+    else
+      call RESPA_Step( dt, 3 )
+    end if
   end subroutine execute_step
   !-------------------------------------------------------------------------------------------------
   subroutine Configure_System( md )
@@ -188,7 +192,7 @@ contains
     call EmDee_upload( md, "charges"//c_null_char, c_loc(Config%Charge(1)) )
     call EmDee_upload( md, "box"//c_null_char, c_loc(Config%Lx) )
     call EmDee_upload( md, "coordinates"//c_null_char, c_loc(Config%R(1,1)) )
-    if (Config%velocity_input) then
+    if (Config%velocity_input .or. (method == stochastic_isokinetic_nh_respa)) then
       call EmDee_upload( md, "momenta"//c_null_char, c_loc(Config%P(1,1)) )
     else
       call EmDee_random_momenta( md, kT, .true._1, seed )
@@ -230,7 +234,7 @@ end subroutine Configure_System
     TotalEnergy = md%Energy%Potential + kineticEnergy
     properties = trim(adjustl(int2str(step))) // " " // &
                  join(real2str([ Temp, &
-                                 Pconv*((dof-3)*kB*Temp/3 + md%Virial%Total/3.0_rb)/Volume, &
+                                 Pconv*(dof*kB*Temp + md%Virial%Total)/(3.0_rb*Volume), &
                                  mvv2e*[kineticEnergy, &
                                         md%Energy%Dispersion, &
                                         md%Energy%Coulomb, &
@@ -280,7 +284,8 @@ end subroutine Configure_System
     read(inp,*); read(inp,*) thermo
     read(inp,*); read(inp,*) Nequil, Nprod
     read(inp,*); read(inp,*) method
-    read(inp,*); read(inp,*) ndamp, M, nloops
+    read(inp,*); read(inp,*) tau, gamma
+    read(inp,*); read(inp,*) M, nloops
     read(inp,*); read(inp,*) npairs
     computeRDF = npairs /= 0
     allocate( itype(npairs), jtype(npairs) )
@@ -303,7 +308,9 @@ end subroutine Configure_System
     call writeln( "Number of equilibration steps:", int2str(Nequil) )
     call writeln( "Number of production steps:", int2str(Nprod) )
     call writeln( "Thermostat method:", int2str(method) )
-    call writeln( "Thermostat parameters:", int2str(ndamp), int2str(M), int2str(nloops) )
+    call writeln( "Thermostat time scale:", real2str(tau), "fs" )
+    call writeln( "Thermostat friction coefficient:", real2str(gamma), "fs^(-1)" )
+    call writeln( "Nose-Hoover parameters:", int2str(M), int2str(nloops) )
     call writeln()
   end subroutine Read_Specifications
   !-------------------------------------------------------------------------------------------------
@@ -313,11 +320,10 @@ end subroutine Configure_System
     if (Rc+skin >= half*minval(L)) call error( "minimum image convention failed!" )
     dt_2 = half*dt
     dt_4 = 0.25_rb*dt
-    dof = 3*Config%natoms - 3
+    dof = 3*Config%natoms
     kT = kB*T
     KE_sp = half*dof*kT
     Volume = product(L)
-    tdamp = ndamp*dt
 
     call random % setup( seed )
 
@@ -334,13 +340,13 @@ end subroutine Configure_System
         call error("Specified thermostat method not implemented")
     end select
 
+    call thermostat % setup( 3*Config%natoms, Config%invMass, kT, tau, seed, threads )
+
     select type(thermo => thermostat)
       class is (nhc)
-        call thermo % setup( M, kT, tdamp, dof, nloops )
-      class is (csvr)
-        call thermo % setup( kT, tdamp, dof, seed )
+        call thermo % initialize( M, nloops )
       class is (sinr)
-        call thermo % setup( kT, tdamp, 3, Config%natoms, Config%mass(Config%Type), seed )
+        call thermo % initialize( gamma, c_loc(Config%P) )
     end select
 
   end subroutine Setup_Simulation
@@ -377,11 +383,10 @@ end subroutine Configure_System
     dt_2 = half*dt
     do step = 1, RespaN(layer)
       call EmDee_switch_model_layer( md, layer )
-      Config%P = Config%P + F(:,:,layer)*dt_2
+      call thermostat % boost( dt_2, F(:,:,layer), Config%P )
       if (layer == 1) then
         call EmDee_displace( md, one, zero, dt_2 )
-        call thermostat % integrate( dt, sum(Config%invMass*Config%P**2) )
-        Config%P = Config%P*exp(-thermostat%damping*dt)
+        call thermostat % integrate( dt, Config%P )
         call EmDee_displace( md, one, zero, dt_2 )
       else
         call RESPA_Step( dt, layer-1 )
@@ -389,7 +394,7 @@ end subroutine Configure_System
       call EmDee_switch_model_layer( md, layer )
       call EmDee_compute_forces( md )
       if (layer == 3) call discount_forces()
-      Config%P = Config%P + F(:,:,layer)*dt_2
+      call thermostat % boost( dt_2, F(:,:,layer), Config%P )
     end do
 
   end subroutine

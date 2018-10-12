@@ -15,7 +15,7 @@ T
 [Largest integration time step (fs)]
 1.0
 [Number of RESPA loops for each one of three layers]
-5 1 1
+1 1 1
 [Skin distance for neighbor lists (Å)]
 2
 [Interval for saving configurations]
@@ -25,9 +25,11 @@ T
 [Numbers of equilibration and production steps]
 500 500
 [Thermostatting method: 0) NVE; 1) NHC; 2) Bussi; 3) SIN(R)]
-3
-[Thermostat parameters: ndamp, nchain, nloops]
-1 6 10
+2
+[Thermostat parameters: tau (fs), gamma (1/fs)]
+10. 0.1
+[Nosé-Hoover-related parameters: nchain, nloops]
+6 10
 [Compute rdf: number of pairs]
 0
 [Compute rdf parameters: nevery bins itypes jtypes]

@@ -2,29 +2,38 @@ module mThermostat
 
 use mGlobal
 use mRandom
+use iso_c_binding
+use omp_lib
 
 implicit none
 
 type, abstract :: tThermostat
+  integer  :: dof
+  integer  :: seed
+  integer  :: nthreads
+  real(rb) :: kT
+  real(rb) :: tau
+  integer,       allocatable :: first(:), last(:)
+  real(rb),      allocatable :: m(:)
+  type(mt19937), allocatable :: random(:)
+
   real(rb) :: damping
   real(rb) :: meanFactor
   contains
+    procedure :: setup => tThermostat_setup
+    procedure :: finish_setup => tThermostat_finish_setup
+    procedure :: boost => tThermostat_boost
+    procedure :: energy => tThermostat_energy
     procedure(tThermostat_integrate), deferred :: integrate
-    procedure(tThermostat_energy),    deferred :: energy
 end type tThermostat
 
 abstract interface
-  subroutine tThermostat_integrate( me, timestep, TwoKE )
+  subroutine tThermostat_integrate( me, timestep, v )
     import :: rb, tThermostat
     class(tThermostat), intent(inout) :: me
-    real(rb),           intent(in)    :: timestep, TwoKE
+    real(rb),           intent(in)    :: timestep
+    real(rb),           intent(inout) :: v(*)
   end subroutine tThermostat_integrate
-
-  function tThermostat_energy( me ) result( energy )
-    import :: rb, tThermostat
-    class(tThermostat), intent(in) :: me
-    real(rb)                       :: energy
-  end function tThermostat_energy
 end interface
 
 !---------------------------------------------------------------------------------------------------
@@ -33,7 +42,6 @@ end interface
 
 type, extends(tThermostat) :: nve
 contains
-  procedure :: energy => nve_energy
   procedure :: integrate => nve_integrate
 end type nve
 
@@ -42,15 +50,14 @@ end type nve
 !---------------------------------------------------------------------------------------------------
 
 type, extends(tThermostat) :: nhc
-  integer,  private :: M                     !> Number of thermostats in the chain
+  integer,  private :: NC                     !> Number of thermostats in the chain
   integer,  private :: nloops                !> Number of RESPA loops for integration
-  real(rb), private :: kT                    !> Target temperature in energy units
   real(rb), private :: LKT                   !> kT times the number of degrees of freedom
   real(rb), allocatable :: InvQ(:)  !> Inverse of thermostat inertial parameters
   real(rb), allocatable :: eta(:)   !> Thermostat "coordinates"
   real(rb), allocatable :: p(:)     !> Thermostat "momenta"
   contains
-    procedure :: setup => nhc_setup
+    procedure :: initialize => nhc_initialize
     procedure :: energy => nhc_energy
     procedure :: integrate => nhc_integrate
 end type
@@ -61,13 +68,10 @@ end type
 !---------------------------------------------------------------------------------------------------
 
 type, extends(tThermostat) :: csvr
-  integer  :: dof
   real(rb) :: TwoKE
-  real(rb) :: tau
   real(rb) :: Hthermo
-  type(mt19937) :: random
 contains
-  procedure :: setup => csvr_setup
+  procedure :: finish_setup => csvr_finish_setup
   procedure :: energy => csvr_energy
   procedure :: integrate => csvr_integrate
 end type csvr
@@ -77,18 +81,15 @@ end type csvr
 !---------------------------------------------------------------------------------------------------
 
 type, extends(tThermostat) :: sinr
-  integer  :: d   ! System dimensionality
-  integer  :: N   ! Number of particles
-  real(rb) :: kT  ! Temperature in energy units
-  real(rb) :: Q1  ! Inertial parameter associated to v1
-  real(rb) :: Q2  ! Inertial parameter associated to v2
-  real(rb), allocatable :: mass(:,:)
-  real(rb), allocatable :: v(:,:)
-  real(rb), allocatable :: v1(:,:)
-  real(rb), allocatable :: v2(:,:)
-  type(mt19937) :: random
+  real(rb) :: Q1       ! Inertial parameter
+  real(rb) :: Q2       ! Inertial parameter
+  real(rb) :: halfQ1   ! Half inertial parameter
+  real(rb) :: gamma
+  real(rb), pointer     :: v(:)
+  real(rb), allocatable :: v1(:)
+  real(rb), allocatable :: v2(:)
 contains
-  procedure :: setup => sinr_setup
+  procedure :: initialize => sinr_initialize
   procedure :: energy => sinr_energy
   procedure :: integrate => sinr_integrate
 end type sinr
@@ -98,51 +99,95 @@ end type sinr
 contains
 
   !=================================================================================================
-  !                                F A K E    T H E R M O S T A T
+  !                                A L L    T H E R M O S T A T S
   !=================================================================================================
 
-  function nve_energy( me ) result( energy )
-    class(nve), intent(in) :: me
-    real(rb)               :: energy
-    energy = zero
-  end function nve_energy
+  subroutine tThermostat_setup( me, dof, mass, kT, tau, seed, threads )
+    class(tThermostat), intent(inout) :: me
+    integer,            intent(in)    :: dof
+    real(rb),           intent(in)    :: mass(*), kT, tau
+    integer,            intent(in)    :: seed, threads
+
+    integer :: i, perThread, newseed
+
+    me%dof = dof
+    me%m = mass(1:dof)
+    me%kT = kT
+    me%tau = tau
+
+    me%nthreads =  threads
+    perThread = (dof + threads - 1)/threads
+    me%first = [((i - 1)*perThread + 1, i=1, threads)]
+    me%last = [(min(i*perThread, threads), i=1, threads)]
+    allocate( me%random(threads) )
+    newseed = seed
+    do i = 1, threads
+      call me % random(i) % setup( newseed )
+      newseed = me%random(i)%i32()
+    end do
+
+    call me % finish_setup()
+
+  end subroutine tThermostat_setup
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine nve_integrate( me, timestep, TwoKE )
+  subroutine tThermostat_finish_setup( me )
+    class(tThermostat), intent(inout) :: me
+  end subroutine tThermostat_finish_setup
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine tThermostat_boost( me, dt, a, v )
+    class(tThermostat), intent(in)    :: me
+    real(rb),           intent(in)    :: dt, a(*)
+    real(rb),           intent(inout) :: v(*)
+    v(1:me%dof) = v(1:me%dof) + dt*a(1:me%dof)
+  end subroutine tThermostat_boost
+
+  !-------------------------------------------------------------------------------------------------
+
+  function tThermostat_energy( me ) result( energy )
+    class(tThermostat), intent(in) :: me
+    real(rb)                       :: energy
+    energy = zero
+  end function tThermostat_energy
+
+  !=================================================================================================
+  !                                F A K E    T H E R M O S T A T
+  !=================================================================================================
+
+  subroutine nve_integrate( me, timestep, v )
     class(nve), intent(inout) :: me
-    real(rb),   intent(in)    :: timestep, TwoKE
-    me%damping = zero
+    real(rb),   intent(in)    :: timestep
+    real(rb),   intent(inout) :: v(*)
   end subroutine nve_integrate
 
   !=================================================================================================
   !                              N O S É - H O O V E R     C H A I N
   !=================================================================================================
 
-  subroutine nhc_setup( me, nchain, kT, tdamp, dof, nloops )
+  subroutine nhc_initialize( me, nchain, nloops )
     class(nhc), intent(inout) :: me
     integer,    intent(in)    :: nchain
-    real(rb),   intent(in)    :: kT, tdamp
-    integer,    intent(in)    :: dof
     integer,    intent(in)    :: nloops
-    me%M = nchain
-    me%kT = kT
-    me%LKT = dof*kT
+    me%NC = nchain
+    me%LKT = (me%dof - 3)*me%kT
     me%nloops = nloops
     allocate( me%InvQ(nchain), me%eta(nchain), me%p(nchain) )
-    me%InvQ(1) = one/(me%LKT*tdamp**2)
-    me%InvQ(2:nchain) = one/(kT*tdamp**2)
+    me%InvQ(1) = one/(me%LKT*me%tau**2)
+    me%InvQ(2:nchain) = one/(me%kT*me%tau**2)
     me%eta = zero
     me%p = zero
-  end subroutine nhc_setup
+  end subroutine nhc_initialize
 
   !-------------------------------------------------------------------------------------------------
 
   function nhc_energy( me ) result( energy )
     class(nhc), intent(in) :: me
     real(rb)               :: energy
-    if (me%M /= 0) then
-      energy = me%LkT*me%eta(1) + me%kT*sum(me%eta(2:me%M)) + half*sum(me%p**2*me%InvQ)
+    if (me%NC /= 0) then
+      energy = me%LkT*me%eta(1) + me%kT*sum(me%eta(2:me%NC)) + half*sum(me%p**2*me%InvQ)
     else
       energy = zero
     end if
@@ -150,38 +195,37 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine nhc_integrate( me, timestep, TwoKE )
+  subroutine nhc_integrate( me, timestep, v )
     class(nhc), intent(inout) :: me
-    real(rb),   intent(in)    :: timestep, TwoKE
+    real(rb),   intent(in)    :: timestep
+    real(rb),   intent(inout) :: v(*)
 
-    integer :: i, j
-    real(rb) :: dt, dt_2, twodt, alpha, alphaSum, factor, sumFactor
+    integer  :: i, j
+    real(rb) :: TwoKE, dt, dt_2, twodt, alpha, alphaSum, factor
 
+    TwoKE = sum(me%m*v(1:me%dof)**2)
     dt = timestep/me%nloops
     dt_2 = half*dt
     twodt = two*dt
     alphaSum = zero
     factor = one
-    sumFactor = zero
     do i = 1, me%nloops
-      me%p(me%M) = me%p(me%M) + (me%p(me%M-1)**2*me%InvQ(me%M-1) - me%kT)*dt_2
-      do j = me%M-1, 2, -1
+      me%p(me%NC) = me%p(me%NC) + (me%p(me%NC-1)**2*me%InvQ(me%NC-1) - me%kT)*dt_2
+      do j = me%NC-1, 2, -1
         call integrate( me, j, me%p(j+1)*me%InvQ(j+1), me%p(j-1)**2*me%InvQ(j-1) - me%kT, dt_2 )
       end do
       call integrate( me, 1, me%p(2)*me%InvQ(2), factor**2*twoKE - me%LkT, dt_2 )
       alpha = me%p(1)*me%InvQ(1)
       alphaSum = alphaSum + alpha
       factor = exp(-alphaSum*dt)
-      sumFactor = sumFactor + factor
       call integrate( me, 1, me%p(2)*me%InvQ(2), factor**2*twoKE - me%LkT, dt_2 )
-      do j = 2, me%M-1
+      do j = 2, me%NC-1
         call integrate( me, j, me%p(j+1)*me%InvQ(j+1), me%p(j-1)**2*me%InvQ(j-1) - me%kT, dt_2 )
       end do
-      me%p(me%M) = me%p(me%M) + (me%p(me%M-1)**2*me%InvQ(me%M-1) - me%kT)*dt_2
+      me%p(me%NC) = me%p(me%NC) + (me%p(me%NC-1)**2*me%InvQ(me%NC-1) - me%kT)*dt_2
     end do
     me%eta(1) = me%eta(1) + alphaSum*dt
-    me%damping = alphaSum/me%nloops
-    me%meanFactor = sumFactor/me%nloops
+    v(1:me%dof) = v(1:me%dof)*exp(-dt*alphaSum)
 
     contains
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -208,16 +252,11 @@ contains
   !                  S T O C H A S T I C    V E L O C I T Y    R E S C A L I N G
   !=================================================================================================
 
-  subroutine csvr_setup( me, kT, tau, dof, seed )
+  subroutine csvr_finish_setup( me )
     class(csvr), intent(inout) :: me
-    real(rb),    intent(in)    :: kT, tau
-    integer,     intent(in)    :: dof, seed
-    me%TwoKE = dof*kT
-    me%tau = tau
-    me%dof = dof
+    me%TwoKE = me%dof*me%kT
     me%Hthermo = zero
-    call me % random % setup( seed )
-  end subroutine csvr_setup
+  end subroutine csvr_finish_setup
 
   !-------------------------------------------------------------------------------------------------
 
@@ -229,26 +268,28 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine csvr_integrate( me, timestep, TwoKE )
+  subroutine csvr_integrate( me, timestep, v )
     class(csvr), intent(inout) :: me
-    real(rb),    intent(in)    :: timestep, TwoKE
+    real(rb),    intent(in)    :: timestep
+    real(rb),    intent(inout) :: v(*)
 
-    real(rb) :: alphaSq, R1, x, sumRs, A, B, C
+    real(rb) :: TwoKE, alphaSq, R1, x, sumRs, A, B, C
 
-    R1 = me%random%normal()
+    TwoKE = sum(me%m*v(1:me%dof)**2)
+    R1 = me%random(1)%normal()
     if (mod(me%dof, 2) == 1) then
       x = (me%dof - 1)/2
-      sumRs = 2.0*me%random%gamma(x)
+      sumRs = 2.0*me%random(1)%gamma(x)
     else
       x = (me%dof - 2)/2
-      sumRs = 2.0*me%random%gamma(x) + me%random%normal()**2
+      sumRs = 2.0*me%random(1)%gamma(x) + me%random(1)%normal()**2
     end if
     A = exp(-timestep/me%tau)
     B = 1.0 - A
     C = me%TwoKE/(me%dof*TwoKE)
     alphaSq = A + C*B*(R1**2 + sumRs) + 2.0*sqrt(C*B*A)*R1
-    me%damping = -half*log(alphaSq)/timestep
     me%Hthermo = me%Hthermo + (one - alphaSq)*half*TwoKE
+    v(1:me%dof) = v(1:me%dof)*sqrt(alphaSq)
 
   end subroutine csvr_integrate
 
@@ -256,41 +297,45 @@ contains
   !        S T O C H A S T I C    I S O K I N E T I C    N O S E - H O O V E R    R E S P A
   !=================================================================================================
 
-  subroutine sinr_setup( me, kT, tau, d, N, mass, seed )
+  subroutine sinr_initialize( me, friction, v_address )
     class(sinr), intent(inout) :: me
-    real(rb),    intent(in)    :: kT, tau
-    integer,     intent(in)    :: d, N, seed
-    real(rb),    intent(in)    :: mass(N)
+    real(rb),    intent(in)    :: friction
+    type(c_ptr), intent(in)    :: v_address
 
-    integer :: i, j
+    integer :: i
 
-    me%d = d
-    me%N = N
-    me%kT = kT
-    me%Q1 = kT*tau**2
-    me%Q2 = kT*tau**2
-    allocate( me%v(d,N), me%v1(d,N), me%v2(d,N), me%mass(d,N) )
-    forall (i=1:N) me%mass(:,i) = mass(i)
-    call me % random % setup( seed )
-    do i = 1, N
-      do j = 1, 3
-        call initialize( me%v(j,i), me%v1(j,i), mass(i) )
+    me%Q1 = me%kT*me%tau**2
+    me%Q2 = me%kT*me%tau**2
+    me%halfQ1 = half*me%Q1
+    me%gamma = friction
+    call c_f_pointer( v_address, me%v, [me%dof] )
+    allocate( me%v1(me%dof), me%v2(me%dof), source = zero )
+
+    !$omp parallel num_threads(me%nthreads)
+    block
+      integer :: thread, i
+      thread = omp_get_thread_num() + 1
+      do i = me%first(thread), me%last(thread)
+        call initialize( thread, me%v(i), me%v1(i), me%m(i) )
       end do
-    end do
+    end block
+    !$omp end parallel
+
     contains
-     ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-      subroutine initialize( v, v1, m )
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine initialize( thread, v, v1, m )
+        integer,  intent(in)  :: thread
         real(rb), intent(out) :: v, v1
         real(rb), intent(in)  :: m
         real(rb) :: factor
-        v = sqrt(half*kT/m)*me%random%normal()
-        v1 = sqrt(kT/me%Q1)*me%random%normal()
-        factor = sqrt(kT/(m*v*v + half*me%Q1*v1*v1))
+        v = sqrt(half*me%kT/m)*me%random(thread)%normal()
+        v1 = sqrt(me%kT/me%Q1)*me%random(thread)%normal()
+        factor = sqrt(me%kT/(m*v*v + me%halfQ1*v1*v1))
         v = factor*v
         v1 = factor*v1
       end subroutine initialize
-     ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-  end subroutine sinr_setup
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+  end subroutine sinr_initialize
 
   !-------------------------------------------------------------------------------------------------
 
@@ -302,11 +347,56 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine sinr_integrate( me, timestep, TwoKE )
+  subroutine sinr_integrate( me, timestep, v )
     class(sinr), intent(inout) :: me
-    real(rb),    intent(in)    :: timestep, TwoKE
+    real(rb),    intent(in)    :: timestep
+    real(rb),    intent(inout) :: v(*)
 
+    real(rb) :: A, B, C
+
+    A = exp(-me%gamma*timestep)
+    B = (one - A)/(me%gamma*me%Q2)
+    C = sqrt(me%kT*(one - A*A)/me%Q2)
+
+    !$omp parallel num_threads(me%nthreads)
+    block
+      integer :: thread, i
+      thread = omp_get_thread_num() + 1
+      do i = me%first(thread), me%last(thread)
+        call isokinetic( i, half*timestep )
+        call ornstein_uhlenbeck( i, timestep, me%random(thread)%normal() )
+        call isokinetic( i, half*timestep )
+      end do
+    end block
+    !$omp end parallel
+
+    contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine isokinetic( i, dt )
+        integer,  intent(in) :: i
+        real(rb), intent(in) :: dt
+        real(rb) :: expmv2dt, mvv, H
+        expmv2dt = exp(-me%v2(i)*dt)
+        mvv = me%m(i)*me%v(i)**2
+        H = sqrt(me%kT/(mvv + (me%kT - mvv)*expmv2dt*expmv2dt))
+        me%v(i) = me%v(i)*H
+        me%v1(i) = me%v1(i)*H*expmv2dt
+      end subroutine isokinetic
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine ornstein_uhlenbeck( i, dt, R )
+        integer,  intent(in) :: i
+        real(rb), intent(in) :: dt, R
+        me%v2(i) = me%v2(i)*A + (me%Q1*me%v1(i)**2 - me%kT)*B + C*R
+      end subroutine ornstein_uhlenbeck
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine sinr_integrate
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine sinr_isokinetic( me, timestep, force )
+    class(sinr), intent(inout) :: me
+    real(rb),    intent(in)    :: timestep, force(*)
+  end subroutine sinr_isokinetic
 
   !=================================================================================================
 
