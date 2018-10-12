@@ -25,7 +25,7 @@ T
 [Numbers of equilibration and production steps]
 500 500
 [Thermostatting method: 0) NVE; 1) NHC; 2) Bussi; 3) Langevin; 4) SIN(R)]
-3
+4
 [Thermostat parameters: tau (fs), gamma (1/fs)]
 10. 0.1
 [Nosé-Hoover-related parameters: nchain, nloops]

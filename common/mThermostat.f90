@@ -342,7 +342,7 @@ contains
       integer :: thread, i
       thread = omp_get_thread_num() + 1
       do i = me%first(thread), me%last(thread)
-        call ornstein_uhlenbeck( i, timestep, me%random(thread)%normal() )
+        v(i) = A*v(i) + B*me%invSqrtM(i)*me%random(thread)%normal()
       end do
     end block
     !$omp end parallel
@@ -352,7 +352,7 @@ contains
       subroutine ornstein_uhlenbeck( i, dt, R )
         integer,  intent(in) :: i
         real(rb), intent(in) :: dt, R
-        v(i) = A*v(i) + B*me%invSqrtM(i)*R
+        
       end subroutine ornstein_uhlenbeck
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine langevin_integrate
@@ -375,6 +375,7 @@ contains
     me%Q1 = me%kT*me%tau**2
     me%Q2 = me%kT*me%tau**2
     me%halfQ1 = half*me%Q1
+    me%gamma = one/me%tau
     allocate( me%v1(me%dof), me%v2(me%dof), source = zero )
   end subroutine sinr_finish_setup
 
@@ -421,22 +422,26 @@ contains
     real(rb),    intent(in)    :: timestep
     real(rb),    intent(inout) :: v(*)
 
+    real(rb) :: dt_2
     real(rb) :: A, B, C
 
+    dt_2 = half*timestep
     A = exp(-me%gamma*timestep)
-    B = (one - A)/(me%gamma*me%Q2)
-    C = sqrt(me%kT*(one - A*A)/me%Q2)
+    B = sqrt(me%kT*(one - A*A)/me%Q2)
+    C = (one - A)/(me%gamma*me%Q2)
 
     !$omp parallel num_threads(me%nthreads)
     block
       integer :: thread, i
       thread = omp_get_thread_num() + 1
       do i = me%first(thread), me%last(thread)
-!        call isokinetic( i, half*timestep )
-me%v1(i) = v(i)
-        call ornstein_uhlenbeck( i, timestep, me%random(thread)%normal() )
-!        call isokinetic( i, half*timestep )
-v(i) = v(i)*exp(-me%v2(i)*timestep)
+        v(i) = v(i)*exp(-me%v1(i)*dt_2)
+        me%v1(i) = me%v1(i) + dt_2*(me%m(i)*v(i)**2 - me%kT)/me%Q1
+        me%v1(i) = me%v1(i)*exp(-me%v2(i)*dt_2)
+        me%v2(i) = A*me%v2(i) + B*me%random(thread)%normal() + C*(me%Q1*me%v1(i)**2 - me%kT)
+        me%v1(i) = me%v1(i)*exp(-me%v2(i)*dt_2)
+        me%v1(i) = me%v1(i) + dt_2*(me%m(i)*v(i)**2 - me%kT)/me%Q1
+        v(i) = v(i)*exp(-me%v1(i)*dt_2)
       end do
     end block
     !$omp end parallel
@@ -453,12 +458,6 @@ v(i) = v(i)*exp(-me%v2(i)*timestep)
         v(i) = v(i)*H
         me%v1(i) = me%v1(i)*H*expmv2dt
       end subroutine isokinetic
-      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-      subroutine ornstein_uhlenbeck( i, dt, R )
-        integer,  intent(in) :: i
-        real(rb), intent(in) :: dt, R
-        me%v2(i) = me%v2(i)*A + (me%Q1*me%v1(i)**2 - me%kT)*B + C*R
-      end subroutine ornstein_uhlenbeck
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine sinr_integrate
 
