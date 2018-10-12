@@ -8,17 +8,15 @@ use omp_lib
 implicit none
 
 type, abstract :: tThermostat
-  integer  :: dof
-  integer  :: seed
-  integer  :: nthreads
-  real(rb) :: kT
-  real(rb) :: tau
-  integer,       allocatable :: first(:), last(:)
-  real(rb),      allocatable :: m(:)
-  type(mt19937), allocatable :: random(:)
-
-  real(rb) :: damping
-  real(rb) :: meanFactor
+  integer  :: dof                         ! Number of degrees of freedom
+  integer  :: seed                        ! Seed for random numbers
+  integer  :: nthreads                    ! Number of parallel threads
+  real(rb) :: kT                          ! Temperature in energy units
+  real(rb) :: tau                         ! Characteristic time scale
+  real(rb),      allocatable :: m(:)      ! Mass associated to each degree of freedom
+  integer,       allocatable :: first(:)  ! The first degree of freedom of each thread
+  integer,       allocatable :: last(:)   ! The last degree of freedom of each thread
+  type(mt19937), allocatable :: random(:) ! A random number generator for each thread
   contains
     procedure :: setup => tThermostat_setup
     procedure :: finish_setup => tThermostat_finish_setup
@@ -50,9 +48,9 @@ end type nve
 !---------------------------------------------------------------------------------------------------
 
 type, extends(tThermostat) :: nhc
-  integer,  private :: NC                     !> Number of thermostats in the chain
-  integer,  private :: nloops                !> Number of RESPA loops for integration
-  real(rb), private :: LKT                   !> kT times the number of degrees of freedom
+  integer,  private :: NC           !> Number of thermostats in the chain
+  integer,  private :: nloops       !> Number of RESPA loops for integration
+  real(rb), private :: LKT          !> kT times the number of degrees of freedom
   real(rb), allocatable :: InvQ(:)  !> Inverse of thermostat inertial parameters
   real(rb), allocatable :: eta(:)   !> Thermostat "coordinates"
   real(rb), allocatable :: p(:)     !> Thermostat "momenta"
@@ -61,7 +59,6 @@ type, extends(tThermostat) :: nhc
     procedure :: energy => nhc_energy
     procedure :: integrate => nhc_integrate
 end type
-
 
 !---------------------------------------------------------------------------------------------------
 !                    S T O C H A S T I C    V E L O C I T Y    R E S C A L I N G
@@ -77,6 +74,20 @@ contains
 end type csvr
 
 !---------------------------------------------------------------------------------------------------
+!                                          L A N G E V I N
+!---------------------------------------------------------------------------------------------------
+
+type, extends(tThermostat) :: langevin
+  real(rb) :: gamma
+  real(rb), allocatable :: invSqrtM(:)
+contains
+  procedure :: finish_setup => langevin_finish_setup
+  procedure :: initialize => langevin_initialize
+  procedure :: integrate => langevin_integrate
+  procedure :: boost => langevin_boost
+end type langevin
+
+!---------------------------------------------------------------------------------------------------
 !        S T O C H A S T I C    I S O K I N E T I C    N O S E - H O O V E R    R E S P A
 !---------------------------------------------------------------------------------------------------
 
@@ -85,13 +96,13 @@ type, extends(tThermostat) :: sinr
   real(rb) :: Q2       ! Inertial parameter
   real(rb) :: halfQ1   ! Half inertial parameter
   real(rb) :: gamma
-  real(rb), pointer     :: v(:)
   real(rb), allocatable :: v1(:)
   real(rb), allocatable :: v2(:)
 contains
+  procedure :: finish_setup => sinr_finish_setup
   procedure :: initialize => sinr_initialize
-  procedure :: energy => sinr_energy
   procedure :: integrate => sinr_integrate
+  procedure :: boost => sinr_boost
 end type sinr
 
 !---------------------------------------------------------------------------------------------------
@@ -118,7 +129,7 @@ contains
     me%nthreads =  threads
     perThread = (dof + threads - 1)/threads
     me%first = [((i - 1)*perThread + 1, i=1, threads)]
-    me%last = [(min(i*perThread, threads), i=1, threads)]
+    me%last = [(min(i*perThread, dof), i=1, threads)]
     allocate( me%random(threads) )
     newseed = seed
     do i = 1, threads
@@ -297,35 +308,100 @@ contains
   !        S T O C H A S T I C    I S O K I N E T I C    N O S E - H O O V E R    R E S P A
   !=================================================================================================
 
-  subroutine sinr_initialize( me, friction, v_address )
-    class(sinr), intent(inout) :: me
-    real(rb),    intent(in)    :: friction
-    type(c_ptr), intent(in)    :: v_address
+  subroutine langevin_finish_setup( me )
+    class(langevin), intent(inout) :: me
 
-    integer :: i
+    me%gamma = one/me%tau
+    allocate( me%invSqrtM(me%dof) )
+    me%invSqrtM = one/sqrt(me%m)
 
-    me%Q1 = me%kT*me%tau**2
-    me%Q2 = me%kT*me%tau**2
-    me%halfQ1 = half*me%Q1
+  end subroutine langevin_finish_setup
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine langevin_initialize( me, friction )
+    class(langevin), intent(inout) :: me
+    real(rb),        intent(in)    :: friction
     me%gamma = friction
-    call c_f_pointer( v_address, me%v, [me%dof] )
-    allocate( me%v1(me%dof), me%v2(me%dof), source = zero )
+  end subroutine langevin_initialize
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine langevin_integrate( me, timestep, v )
+    class(langevin), intent(inout) :: me
+    real(rb),    intent(in)    :: timestep
+    real(rb),    intent(inout) :: v(*)
+
+    real(rb) :: A, B
+
+    A = exp(-me%gamma*timestep)
+    B = sqrt(me%kT*(one - A*A))
 
     !$omp parallel num_threads(me%nthreads)
     block
       integer :: thread, i
       thread = omp_get_thread_num() + 1
       do i = me%first(thread), me%last(thread)
-        call initialize( thread, me%v(i), me%v1(i), me%m(i) )
+        call ornstein_uhlenbeck( i, timestep, me%random(thread)%normal() )
       end do
     end block
     !$omp end parallel
 
     contains
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-      subroutine initialize( thread, v, v1, m )
+      subroutine ornstein_uhlenbeck( i, dt, R )
+        integer,  intent(in) :: i
+        real(rb), intent(in) :: dt, R
+        v(i) = A*v(i) + B*me%invSqrtM(i)*R
+      end subroutine ornstein_uhlenbeck
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+  end subroutine langevin_integrate
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine langevin_boost( me, dt, a, v )
+    class(langevin), intent(in)    :: me
+    real(rb),    intent(in)    :: dt, a(*)
+    real(rb),    intent(inout) :: v(*)
+    v(1:me%dof) = v(1:me%dof) + dt*a(1:me%dof)
+  end subroutine langevin_boost
+
+  !=================================================================================================
+  !        S T O C H A S T I C    I S O K I N E T I C    N O S E - H O O V E R    R E S P A
+  !=================================================================================================
+
+  subroutine sinr_finish_setup( me )
+    class(sinr), intent(inout) :: me
+    me%Q1 = me%kT*me%tau**2
+    me%Q2 = me%kT*me%tau**2
+    me%halfQ1 = half*me%Q1
+    allocate( me%v1(me%dof), me%v2(me%dof), source = zero )
+  end subroutine sinr_finish_setup
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine sinr_initialize( me, friction, v )
+    class(sinr), intent(inout) :: me
+    real(rb),    intent(in)    :: friction
+    real(rb),    intent(inout) :: v(*)
+
+    me%gamma = friction
+
+    !$omp parallel num_threads(me%nthreads)
+    block
+      integer :: thread, i
+      thread = omp_get_thread_num() + 1
+      do i = me%first(thread), me%last(thread)
+        call initialize( thread, v(i), me%v1(i), me%v2(i), me%m(i) )
+      end do
+    end block
+    !$omp end parallel
+
+    contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine initialize( thread, v, v1, v2, m )
         integer,  intent(in)  :: thread
-        real(rb), intent(out) :: v, v1
+        real(rb), intent(out) :: v, v1, v2
         real(rb), intent(in)  :: m
         real(rb) :: factor
         v = sqrt(half*me%kT/m)*me%random(thread)%normal()
@@ -333,17 +409,10 @@ contains
         factor = sqrt(me%kT/(m*v*v + me%halfQ1*v1*v1))
         v = factor*v
         v1 = factor*v1
+        v2 = sqrt(me%kT/me%Q2)*me%random(thread)%normal()
       end subroutine initialize
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine sinr_initialize
-
-  !-------------------------------------------------------------------------------------------------
-
-  function sinr_energy( me ) result( energy )
-    class(sinr), intent(in) :: me
-    real(rb)                :: energy
-    energy = zero
-  end function sinr_energy
 
   !-------------------------------------------------------------------------------------------------
 
@@ -363,9 +432,11 @@ contains
       integer :: thread, i
       thread = omp_get_thread_num() + 1
       do i = me%first(thread), me%last(thread)
-        call isokinetic( i, half*timestep )
+!        call isokinetic( i, half*timestep )
+me%v1(i) = v(i)
         call ornstein_uhlenbeck( i, timestep, me%random(thread)%normal() )
-        call isokinetic( i, half*timestep )
+!        call isokinetic( i, half*timestep )
+v(i) = v(i)*exp(-me%v2(i)*timestep)
       end do
     end block
     !$omp end parallel
@@ -377,9 +448,9 @@ contains
         real(rb), intent(in) :: dt
         real(rb) :: expmv2dt, mvv, H
         expmv2dt = exp(-me%v2(i)*dt)
-        mvv = me%m(i)*me%v(i)**2
+        mvv = me%m(i)*v(i)**2
         H = sqrt(me%kT/(mvv + (me%kT - mvv)*expmv2dt*expmv2dt))
-        me%v(i) = me%v(i)*H
+        v(i) = v(i)*H
         me%v1(i) = me%v1(i)*H*expmv2dt
       end subroutine isokinetic
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -393,10 +464,12 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine sinr_isokinetic( me, timestep, force )
-    class(sinr), intent(inout) :: me
-    real(rb),    intent(in)    :: timestep, force(*)
-  end subroutine sinr_isokinetic
+  subroutine sinr_boost( me, dt, a, v )
+    class(sinr), intent(in)    :: me
+    real(rb),    intent(in)    :: dt, a(*)
+    real(rb),    intent(inout) :: v(*)
+    v(1:me%dof) = v(1:me%dof) + dt*a(1:me%dof)
+  end subroutine sinr_boost
 
   !=================================================================================================
 

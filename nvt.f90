@@ -19,7 +19,8 @@ real(rb), parameter :: kCoul = 0.138935456_rb         ! Coulomb constant in Da*A
 integer, parameter :: velocity_verlet = 0, &
                       nose_hoover_chain = 1, &
                       stochastic_velocity_rescaling = 2, &
-                      stochastic_isokinetic_nh_respa = 3
+                      langevin_thermostat = 3, &
+                      stochastic_isokinetic_nh_respa = 4
 
 ! Simulation specifications:
 integer  :: seed, Nconf, thermo, Nequil, Nprod
@@ -116,14 +117,6 @@ call Config % Write( trim(Base)//"_out.lmp", velocities = .true. )
 call stop_log
 
 contains
-  !-------------------------------------------------------------------------------------------------
-  subroutine execute_step
-    if (method == stochastic_isokinetic_nh_respa) then
-      call SINR_Step( dt, 3 )
-    else
-      call RESPA_Step( dt, 3 )
-    end if
-  end subroutine execute_step
   !-------------------------------------------------------------------------------------------------
   subroutine Configure_System( md )
     type(tEmDee), intent(inout) :: md
@@ -334,6 +327,8 @@ end subroutine Configure_System
         allocate( nhc :: thermostat )
       case (stochastic_velocity_rescaling)
         allocate( csvr :: thermostat )
+      case (langevin_thermostat)
+        allocate( langevin :: thermostat )
       case (stochastic_isokinetic_nh_respa)
         allocate( sinr :: thermostat )
       case default
@@ -345,8 +340,10 @@ end subroutine Configure_System
     select type(thermo => thermostat)
       class is (nhc)
         call thermo % initialize( M, nloops )
+      class is (langevin)
+        call thermo % initialize( gamma )
       class is (sinr)
-        call thermo % initialize( gamma, c_loc(Config%P) )
+        call thermo % initialize( gamma, Config%P )
     end select
 
   end subroutine Setup_Simulation
