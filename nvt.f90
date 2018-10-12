@@ -18,7 +18,8 @@ real(rb), parameter :: kCoul = 0.138935456_rb         ! Coulomb constant in Da*A
 
 integer, parameter :: velocity_verlet = 0, &
                       nose_hoover_chain = 1, &
-                      stochastic_velocity_rescaling = 2
+                      stochastic_velocity_rescaling = 2, &
+                      stochastic_isokinetic_nh_respa = 3
 
 ! Simulation specifications:
 integer  :: seed, Nconf, thermo, Nequil, Nprod
@@ -34,8 +35,7 @@ integer  :: dof
 real(rb) :: Volume
 
 ! SIN(R) variables:
-real(rb), allocatable :: invM(:,:)
-real(rb), pointer     :: P(:,:), F(:,:,:)
+real(rb), pointer :: F(:,:,:)
 
 ! Thermostat variables:
 integer  :: method, M, ndamp, nloops
@@ -79,8 +79,9 @@ call Config % Save_XYZ( trim(Base)//".xyz" )
 call writeln( titles )
 call writeln( properties(0) )
 do step = 1, NEquil
+  md%Options%Compute = mod(step,thermo) == 0
   call execute_step
-  if (mod(step,thermo) == 0) call writeln( properties(step) )
+  if (md%Options%Compute) call writeln( properties(step) )
 end do
 call writeln( "Loop time of", real2str(md%Time%Total), "s." )
 call Report( md )
@@ -98,12 +99,10 @@ if (computeRDF) then
 end if
 
 do step = NEquil+1, NEquil+NProd
+  md%Options%Compute = mod(step,thermo) == 0
   call execute_step
-  if (mod(step,Nconf)==0) then
-    call EmDee_download( md, "coordinates"//c_null_char, c_loc(Config%R(1,1)) )
-    call Config % Save_XYZ( trim(Base)//".xyz", append = .true. )
-  end if
-  if (mod(step,thermo) == 0) call writeln( properties(step) )
+  if (md%Options%Compute) call writeln( properties(step) )
+  if (mod(step,Nconf)==0) call Config % Save_XYZ( trim(Base)//".xyz", append = .true. )
   if (computeRDF .and. (mod(step, nevery) == 0)) then
     call EmDee_rdf(md, bins, npairs, itype, jtype, rdf)
     gr = gr + rdf
@@ -113,7 +112,6 @@ end do
 if (computeRDF) call rdf_save( trim(Base)//".rdf" )
 call writeln( "Loop time of", real2str(md%Time%Total), "s." )
 call Report( md )
-call EmDee_download( md, "coordinates"//c_null_char, c_loc(Config%R(1,1)) )
 call Config % Write( trim(Base)//"_out.lmp", velocities = .true. )
 call stop_log
 
@@ -196,14 +194,16 @@ contains
       call EmDee_random_momenta( md, kT, .true._1, seed )
     end if
 
+    address = EmDee_memory_address( md, "coordinates"//c_null_char )
+    nullify(Config%R)
+    call c_f_pointer( address, Config%R, [3, Config%natoms] )
+
     address = EmDee_memory_address( md, "momenta"//c_null_char )
-    call c_f_pointer( address, P, [3, Config%natoms] )
+    nullify(Config%P)
+    call c_f_pointer( address, Config%P, [3, Config%natoms] )
 
     address = EmDee_memory_address( md, "layerForces"//c_null_char )
     call c_f_pointer( address, F, [3, Config%natoms, nlayers] )
-
-    allocate( invM(3,Config%natoms) )
-    forall (i=1:Config%natoms) invM(:,i) = Config%invMass(Config%Type(i))
 
     call EmDee_switch_model_layer( md, nlayers )
     call EmDee_compute_forces( md )
@@ -225,7 +225,7 @@ end subroutine Configure_System
   character(sl) function properties(step)
     integer, intent(in) :: step
     real(rb) :: Temp, kineticEnergy, TotalEnergy
-    kineticEnergy = half*sum(invM*P**2)
+    kineticEnergy = half*sum(Config%invMass*Config%P**2)
     Temp = (kineticEnergy/KE_sp)*T
     TotalEnergy = md%Energy%Potential + kineticEnergy
     properties = trim(adjustl(int2str(step))) // " " // &
@@ -328,6 +328,8 @@ end subroutine Configure_System
         allocate( nhc :: thermostat )
       case (stochastic_velocity_rescaling)
         allocate( csvr :: thermostat )
+      case (stochastic_isokinetic_nh_respa)
+        allocate( sinr :: thermostat )
       case default
         call error("Specified thermostat method not implemented")
     end select
@@ -337,6 +339,8 @@ end subroutine Configure_System
         call thermo % setup( M, kT, tdamp, dof, nloops )
       class is (csvr)
         call thermo % setup( kT, tdamp, dof, seed )
+      class is (sinr)
+        call thermo % setup( kT, tdamp, 3, Config%natoms, Config%mass(Config%Type), seed )
     end select
 
   end subroutine Setup_Simulation
@@ -373,11 +377,11 @@ end subroutine Configure_System
     dt_2 = half*dt
     do step = 1, RespaN(layer)
       call EmDee_switch_model_layer( md, layer )
-      P = P + F(:,:,layer)*dt_2
+      Config%P = Config%P + F(:,:,layer)*dt_2
       if (layer == 1) then
         call EmDee_displace( md, one, zero, dt_2 )
-        call thermostat % integrate( dt, sum(invM*P*P) )
-        P = P*exp(-thermostat%damping*dt)
+        call thermostat % integrate( dt, sum(Config%invMass*Config%P**2) )
+        Config%P = Config%P*exp(-thermostat%damping*dt)
         call EmDee_displace( md, one, zero, dt_2 )
       else
         call RESPA_Step( dt, layer-1 )
@@ -385,7 +389,7 @@ end subroutine Configure_System
       call EmDee_switch_model_layer( md, layer )
       call EmDee_compute_forces( md )
       if (layer == 3) call discount_forces()
-      P = P + F(:,:,layer)*dt_2
+      Config%P = Config%P + F(:,:,layer)*dt_2
     end do
 
   end subroutine

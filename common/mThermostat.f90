@@ -73,6 +73,27 @@ contains
 end type csvr
 
 !---------------------------------------------------------------------------------------------------
+!        S T O C H A S T I C    I S O K I N E T I C    N O S E - H O O V E R    R E S P A
+!---------------------------------------------------------------------------------------------------
+
+type, extends(tThermostat) :: sinr
+  integer  :: d   ! System dimensionality
+  integer  :: N   ! Number of particles
+  real(rb) :: kT  ! Temperature in energy units
+  real(rb) :: Q1  ! Inertial parameter associated to v1
+  real(rb) :: Q2  ! Inertial parameter associated to v2
+  real(rb), allocatable :: mass(:,:)
+  real(rb), allocatable :: v(:,:)
+  real(rb), allocatable :: v1(:,:)
+  real(rb), allocatable :: v2(:,:)
+  type(mt19937) :: random
+contains
+  procedure :: setup => sinr_setup
+  procedure :: energy => sinr_energy
+  procedure :: integrate => sinr_integrate
+end type sinr
+
+!---------------------------------------------------------------------------------------------------
 
 contains
 
@@ -230,6 +251,62 @@ contains
     me%Hthermo = me%Hthermo + (one - alphaSq)*half*TwoKE
 
   end subroutine csvr_integrate
+
+  !=================================================================================================
+  !        S T O C H A S T I C    I S O K I N E T I C    N O S E - H O O V E R    R E S P A
+  !=================================================================================================
+
+  subroutine sinr_setup( me, kT, tau, d, N, mass, seed )
+    class(sinr), intent(inout) :: me
+    real(rb),    intent(in)    :: kT, tau
+    integer,     intent(in)    :: d, N, seed
+    real(rb),    intent(in)    :: mass(N)
+
+    integer :: i, j
+
+    me%d = d
+    me%N = N
+    me%kT = kT
+    me%Q1 = kT*tau**2
+    me%Q2 = kT*tau**2
+    allocate( me%v(d,N), me%v1(d,N), me%v2(d,N), me%mass(d,N) )
+    forall (i=1:N) me%mass(:,i) = mass(i)
+    call me % random % setup( seed )
+    do i = 1, N
+      do j = 1, 3
+        call initialize( me%v(j,i), me%v1(j,i), mass(i) )
+      end do
+    end do
+    contains
+     ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine initialize( v, v1, m )
+        real(rb), intent(out) :: v, v1
+        real(rb), intent(in)  :: m
+        real(rb) :: factor
+        v = sqrt(half*kT/m)*me%random%normal()
+        v1 = sqrt(kT/me%Q1)*me%random%normal()
+        factor = sqrt(kT/(m*v*v + half*me%Q1*v1*v1))
+        v = factor*v
+        v1 = factor*v1
+      end subroutine initialize
+     ! - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+  end subroutine sinr_setup
+
+  !-------------------------------------------------------------------------------------------------
+
+  function sinr_energy( me ) result( energy )
+    class(sinr), intent(in) :: me
+    real(rb)                :: energy
+    energy = zero
+  end function sinr_energy
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine sinr_integrate( me, timestep, TwoKE )
+    class(sinr), intent(inout) :: me
+    real(rb),    intent(in)    :: timestep, TwoKE
+
+  end subroutine sinr_integrate
 
   !=================================================================================================
 

@@ -33,7 +33,7 @@ type tConfig
   real(rb), pointer :: Rx(:), Ry(:), Rz(:) ! Positions
   real(rb), pointer :: Fx(:), Fy(:), Fz(:) ! Forces
   real(rb), pointer :: Px(:), Py(:), Pz(:) ! Linear momenta
-  real(rb), allocatable :: InvMass(:)
+  real(rb), allocatable :: InvMass(:,:)
 
   logical :: velocity_input = .false.
 
@@ -160,7 +160,7 @@ contains
           me%Px => me%P(1,:)
           me%Py => me%P(2,:)
           me%Pz => me%P(3,:)
-          allocate( me%InvMass(N) )
+          allocate( me%InvMass(3,N) )
         end associate
         do k = 1, me % natoms
           call next_command( unit, narg, arg )
@@ -182,7 +182,7 @@ contains
             me % Rz(i) = me % Rz(i) + str2real(arg(10)) * me % Lz
           end if
         end do
-        me % InvMass = one/me%Mass(me%Type)
+        forall (k=1:me % natoms) me % InvMass(:,k) = one/me%Mass(me%Type(k))
 
       else if ((narg == 1).and.(arg(1) == "Velocities")) then
 
