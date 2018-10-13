@@ -85,9 +85,10 @@ end type langevin
 !---------------------------------------------------------------------------------------------------
 
 type, extends(tThermostat) :: isokinetic
+  real(rb) :: twoKE
 contains
+  procedure :: finish_setup => isokinetic_finish_setup
   procedure :: initialize => isokinetic_initialize
-  procedure :: integrate => isokinetic_integrate
   procedure :: boost => isokinetic_boost
 end type isokinetic
 
@@ -416,29 +417,33 @@ contains
   !                                       I S O K I N E T I C
   !=================================================================================================
 
+  subroutine isokinetic_finish_setup( me )
+    class(isokinetic), intent(inout) :: me
+    me%twoKE = me%dof*me%kT
+  end subroutine isokinetic_finish_setup
+
+  !-------------------------------------------------------------------------------------------------
+
   subroutine isokinetic_initialize( me, v )
     class(isokinetic), intent(inout) :: me
     real(rb),          intent(inout) :: v(*)
 
+    real(rb) :: twokin(me%nthreads)
+
     !$omp parallel num_threads(me%nthreads)
     block
-      integer :: thread, i
+      integer  :: thread, first, last
+      real(rb) :: twoKE
       thread = omp_get_thread_num() + 1
-      do i = me%first(thread), me%last(thread)
-        v(i) = sign(sqrt(me%kT/me%m(i)), me%random(thread)%uniform() - half)
-      end do
+      first = me%first(thread)
+      last = me%last(thread)
+      twokin(thread) = sum(me%m(first:last)*v(first:last)**2)
+      !$omp barrier
+      twoKE = sum(twokin)
+      v(first:last) = v(first:last)*sqrt(me%twoKE/twoKE)
     end block
     !$omp end parallel
   end subroutine isokinetic_initialize
-
-  !-------------------------------------------------------------------------------------------------
-
-  subroutine isokinetic_integrate( me, timestep, v )
-    class(isokinetic), intent(inout) :: me
-    real(rb),    intent(in)    :: timestep
-    real(rb),    intent(inout) :: v(*)
-
-  end subroutine isokinetic_integrate
 
   !-------------------------------------------------------------------------------------------------
 
@@ -447,24 +452,27 @@ contains
     real(rb),    intent(in)    :: dt, a(*)
     real(rb),    intent(inout) :: v(*)
 
+    real(rb) :: Fv(me%nthreads), Fa(me%nthreads)
+
     !$omp parallel num_threads(me%nthreads)
     block
-      integer :: thread, i
-      real(rb) :: lb0, b2, b, coshbt, sinhbt, s, dsdt
+      integer :: thread, first, last
+      real(rb) :: lb0, b2, b, coshbt, sinhbt, s, spinv
 
       thread = omp_get_thread_num() + 1
-      do i = me%first(thread), me%last(thread)
-        lb0 = me%m(i)*a(i)*v(i)/me%kT
-        b2 = me%m(i)*a(i)**2/me%kT
-        b = sqrt(b2)
-        coshbt = cosh(b*dt)
-        sinhbt = sinh(b*dt)
-        s = (lb0*(coshbt - one) + b*sinhbt)/b2
-        dsdt = (lb0*sinhbt + b*coshbt)/b
-        v(i) = (v(i) + a(i)*s)/dsdt
-!        v(i) = sign(sqrt(me%KT/me%m(i)), v(i))
-!        print*, me%m(i)*v(i)**2
-      end do
+      first = me%first(thread)
+      last = me%last(thread)
+      Fv(thread) = sum(me%m(first:last)*a(first:last)*v(first:last))
+      Fa(thread) = sum(me%m(first:last)*a(first:last)**2)
+      !$omp barrier
+      lb0 = sum(Fv)/me%twoKE
+      b2 = sum(Fa)/me%twoKE
+      b = sqrt(b2)
+      coshbt = cosh(b*dt)
+      sinhbt = sinh(b*dt)
+      s = (lb0*(coshbt - one) + b*sinhbt)/b2
+      spinv = b/(lb0*sinhbt + b*coshbt)
+      v(first:last) = (v(first:last) + a(first:last)*s)*spinv
     end block
     !$omp end parallel
 
