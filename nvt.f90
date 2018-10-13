@@ -9,6 +9,8 @@ use mThermostat
 use iso_c_binding
 use EmDee
 
+#define VERLET
+
 implicit none
 
 real(rb), parameter :: mvv2e = 2390.057364_rb         ! Da*A^2/fs^2 to kcal/mol
@@ -20,7 +22,8 @@ integer, parameter :: velocity_verlet = 0, &
                       nose_hoover_chain = 1, &
                       stochastic_velocity_rescaling = 2, &
                       langevin_thermostat = 3, &
-                      stochastic_isokinetic_nh_respa = 4
+                      isokinetic_ensemble = 4, &
+                      stochastic_isokinetic_nh_respa = 5
 
 ! Simulation specifications:
 integer  :: seed, Nconf, thermo, Nequil, Nprod
@@ -81,7 +84,11 @@ call writeln( titles )
 call writeln( properties(0) )
 do step = 1, NEquil
   md%Options%Compute = mod(step,thermo) == 0
+#ifdef VERLET
+  call Verlet_Step( dt )
+#else
   call RESPA_Step( dt, 3 )
+#endif
   if (md%Options%Compute) call writeln( properties(step) )
 end do
 call writeln( "Loop time of", real2str(md%Time%Total), "s." )
@@ -101,7 +108,11 @@ end if
 
 do step = NEquil+1, NEquil+NProd
   md%Options%Compute = mod(step,thermo) == 0
+#ifdef VERLET
+  call Verlet_Step( dt )
+#else
   call RESPA_Step( dt, 3 )
+#endif
   if (md%Options%Compute) call writeln( properties(step) )
   if (mod(step,Nconf)==0) call Config % Save_XYZ( trim(Base)//".xyz", append = .true. )
   if (computeRDF .and. (mod(step, nevery) == 0)) then
@@ -185,7 +196,7 @@ contains
     call EmDee_upload( md, "charges"//c_null_char, c_loc(Config%Charge(1)) )
     call EmDee_upload( md, "box"//c_null_char, c_loc(Config%Lx) )
     call EmDee_upload( md, "coordinates"//c_null_char, c_loc(Config%R(1,1)) )
-    if (Config%velocity_input .or. (method == stochastic_isokinetic_nh_respa)) then
+    if (Config%velocity_input) then
       call EmDee_upload( md, "momenta"//c_null_char, c_loc(Config%P(1,1)) )
     else
       call EmDee_random_momenta( md, kT, .true._1, seed )
@@ -204,7 +215,10 @@ contains
 
     call EmDee_switch_model_layer( md, nlayers )
     call EmDee_compute_forces( md )
+#ifndef VERLET
     call discount_forces()
+#endif
+    call thermostat % initialize( Config%P )
 
 end subroutine Configure_System
   !-------------------------------------------------------------------------------------------------
@@ -309,6 +323,8 @@ end subroutine Configure_System
   !-------------------------------------------------------------------------------------------------
   subroutine Setup_Simulation
     real(rb) :: L(3)
+    character(sl), allocatable :: keyword(:)
+    real(rb),      allocatable :: value(:)
     L = [Config % Lx, Config % Ly, Config % Lz]
     if (Rc+skin >= half*minval(L)) call error( "minimum image convention failed!" )
     dt_2 = half*dt
@@ -329,23 +345,24 @@ end subroutine Configure_System
         allocate( csvr :: thermostat )
       case (langevin_thermostat)
         allocate( langevin :: thermostat )
+      case (isokinetic_ensemble)
+        allocate( isokinetic :: thermostat )
       case (stochastic_isokinetic_nh_respa)
         allocate( sinr :: thermostat )
       case default
         call error("Specified thermostat method not implemented")
     end select
 
-    call thermostat % setup( 3*Config%natoms, Config%invMass, kT, tau, seed, threads )
-
-    select type(thermo => thermostat)
-      class is (nhc)
-        call thermo % initialize( M, nloops )
-      class is (langevin)
-        call thermo % initialize( gamma )
-      class is (sinr)
-        call thermo % initialize( gamma, Config%P )
+    select case (method)
+      case (nose_hoover_chain)
+        keyword = [character(sl) :: "nchains", "nloops"]
+        value   = [real(rb) :: M, nloops]
+      case (langevin_thermostat, stochastic_isokinetic_nh_respa)
+        keyword = [character(sl) :: "friction"]
+        value   = [real(rb) :: gamma]
     end select
 
+    call thermostat % setup( dof, Config%invMass, kT, tau, seed, threads, keyword, value )
   end subroutine Setup_Simulation
 !---------------------------------------------------------------------------------------------------
   subroutine rdf_save( file )
@@ -368,6 +385,21 @@ end subroutine Configure_System
   subroutine discount_forces()
     F(:,:,3) = F(:,:,3) - (F(:,:,1) + F(:,:,2))
   end subroutine discount_forces
+  !-------------------------------------------------------------------------------------------------
+  subroutine Verlet_Step( dt )
+    real(rb), intent(in) :: dt
+
+    real(rb) :: dt_2
+
+    dt_2 = half*dt
+    call thermostat % boost( dt_2, F(:,:,3), Config%P )
+    call EmDee_displace( md, one, zero, dt_2 )
+    call thermostat % integrate( dt, Config%P )
+    call EmDee_displace( md, one, zero, dt_2 )
+    call EmDee_compute_forces( md )
+    call thermostat % boost( dt_2, F(:,:,3), Config%P )
+
+  end subroutine Verlet_Step
   !-------------------------------------------------------------------------------------------------
   subroutine RESPA_Step( timestep, layer )
     real(rb), intent(in) :: timestep
@@ -394,6 +426,6 @@ end subroutine Configure_System
       call thermostat % boost( dt_2, F(:,:,layer), Config%P )
     end do
 
-  end subroutine
+  end subroutine RESPA_Step
 !===================================================================================================
 end program lj_nvt
