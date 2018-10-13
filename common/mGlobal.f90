@@ -1,5 +1,7 @@
 module mGlobal
 
+implicit none
+
 integer,      parameter :: rb = 8      !< Default number of bytes for real numbers
 integer,      parameter :: sl = 512    !< Default character string length
 character(3), parameter :: csl = "512" !< String with default character string length
@@ -357,6 +359,36 @@ contains
     read(arg,*,iostat=ioerr) r
     ok = ioerr == 0
   end function is_real
+
+  !=================================================================================================
+
+  elemental function sinhx_x( x ) result( f )
+    real(rb), intent(in) :: x
+    real(rb)             :: f
+    real(rb), parameter  :: a = one/5040.0, b = one/120.0_rb, c = one/6.0_rb
+    real(rb) :: x2
+    if (abs(x) > 1.0e-5_rb) then
+      f = sinh(x)/x
+    else
+      x2 = x*x
+      f = ((a*x2 + b)*x2 + c)*x2 + one
+    end if
+  end function sinhx_x
+
+  !=================================================================================================
+
+  elemental function coshxm1_x2( x ) result( f )
+    real(rb), intent(in) :: x
+    real(rb)             :: f
+    real(rb), parameter  :: a = one/40320.0, b = one/720.0_rb, c = one/24.0_rb
+    real(rb) :: x2
+    x2 = x*x
+    if (x2 > 1.0e-6_rb) then
+      f = (cosh(x) - one)/x2
+    else
+      f = ((a*x2 + b)*x2 + c)*x2 + half
+    end if
+  end function coshxm1_x2
 
   !=================================================================================================
 

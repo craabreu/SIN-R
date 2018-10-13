@@ -535,12 +535,12 @@ contains
       subroutine isokinetic_part( i, dt )
         integer,  intent(in) :: i
         real(rb), intent(in) :: dt
-        real(rb) :: expmv2dt, mvv, H
-        expmv2dt = exp(-me%v2(i)*dt)
-        mvv = me%m(i)*v(i)**2
-        H = sqrt(me%kT/(mvv + (me%kT - mvv)*expmv2dt*expmv2dt))
+        real(rb) :: x, v1x, H
+        x = exp(-me%v2(i)*dt)
+        v1x = me%v1(i)*x
+        H = sqrt(me%kT/(me%m(i)*v(i)**2 + me%halfQ1*v1x*v1x))
         v(i) = v(i)*H
-        me%v1(i) = me%v1(i)*H*expmv2dt
+        me%v1(i) = v1x*H
       end subroutine isokinetic_part
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine sinr_integrate
@@ -555,17 +555,18 @@ contains
     !$omp parallel num_threads(me%nthreads)
     block
       integer :: thread, i
-      real(rb) :: lb0, b2, b, coshbt, sinhbt, s, spinv
+      real(rb) :: lb0, bsq, b, bdt, x, y, s, spinv
 
       thread = omp_get_thread_num() + 1
       do i = me%first(thread), me%last(thread)
         lb0 = me%m(i)*a(i)*v(i)/me%kT
-        b2 = me%m(i)*a(i)**2/me%kT
-        b = sqrt(b2)
-        coshbt = cosh(b*dt)
-        sinhbt = sinh(b*dt)
-        s = (lb0*(coshbt - one) + b*sinhbt)/b2
-        spinv = b/(lb0*sinhbt + b*coshbt)
+        bsq = me%m(i)*a(i)**2/me%kT
+        b = sqrt(bsq)
+        bdt = b*dt
+        x = coshxm1_x2(bdt)
+        y = sinhx_x(bdt)
+        s = (lb0*x*dt + y)*dt
+        spinv = one/(lb0*y*dt + bdt*bdt*x + one)
         v(i) = (v(i) + a(i)*s)*spinv
         me%v1(i) = me%v1(i)*spinv
       end do
