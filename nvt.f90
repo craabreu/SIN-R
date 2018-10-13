@@ -9,7 +9,7 @@ use mThermostat
 use iso_c_binding
 use EmDee
 
-#define VERLET
+! #define VERLET
 
 implicit none
 

@@ -34,8 +34,6 @@ end type tThermostat
 !---------------------------------------------------------------------------------------------------
 
 type, extends(tThermostat) :: nve
-contains
-  procedure :: integrate => nve_integrate
 end type nve
 
 !---------------------------------------------------------------------------------------------------
@@ -225,16 +223,6 @@ contains
   end function tThermostat_energy
 
   !=================================================================================================
-  !                                F A K E    T H E R M O S T A T
-  !=================================================================================================
-
-  subroutine nve_integrate( me, timestep, v )
-    class(nve), intent(inout) :: me
-    real(rb),   intent(in)    :: timestep
-    real(rb),   intent(inout) :: v(*)
-  end subroutine nve_integrate
-
-  !=================================================================================================
   !                              N O S É - H O O V E R     C H A I N
   !=================================================================================================
 
@@ -402,15 +390,6 @@ contains
       end do
     end block
     !$omp end parallel
-
-    contains
-      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-      subroutine ornstein_uhlenbeck( i, dt, R )
-        integer,  intent(in) :: i
-        real(rb), intent(in) :: dt, R
-        
-      end subroutine ornstein_uhlenbeck
-      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine langevin_integrate
 
   !=================================================================================================
@@ -498,31 +477,30 @@ contains
     class(sinr), intent(inout) :: me
     real(rb),    intent(inout) :: v(*)
 
+    real(rb) :: twokin(me%nthreads)
+
     !$omp parallel num_threads(me%nthreads)
     block
-      integer :: thread, i
+      integer  :: thread, first, last, i
+      real(rb) :: twoKE, sigma1, sigma2, factor
       thread = omp_get_thread_num() + 1
-      do i = me%first(thread), me%last(thread)
-        call initialize( thread, v(i), me%v1(i), me%v2(i), me%m(i) )
+      first = me%first(thread)
+      last = me%last(thread)
+      twokin(thread) = sum(me%m(first:last)*v(first:last)**2)
+      !$omp barrier
+      twoKE = sum(twokin)
+      v(first:last) = v(first:last)*sqrt(half*me%dof*me%kT/twoKE)
+      sigma1 = sqrt(me%kT/me%Q1)
+      sigma2 = sqrt(me%kT/me%Q2)
+      do i = first, last
+        me%v1(i) = sigma1*me%random(thread)%normal()
+        me%v2(i) = sigma2*me%random(thread)%normal()
+        factor = sqrt(me%kT/(me%m(i)*v(i)**2 + me%halfQ1*me%v1(i)**2))
+        v(i) = factor*v(i)
+        me%v1(i) = factor*me%v1(i)
       end do
     end block
     !$omp end parallel
-
-    contains
-      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-      subroutine initialize( thread, v, v1, v2, m )
-        integer,  intent(in)  :: thread
-        real(rb), intent(out) :: v, v1, v2
-        real(rb), intent(in)  :: m
-        real(rb) :: factor
-        v = sqrt(half*me%kT/m)*me%random(thread)%normal()
-        v1 = sqrt(me%kT/me%Q1)*me%random(thread)%normal()
-        factor = sqrt(me%kT/(m*v*v + me%halfQ1*v1*v1))
-        v = factor*v
-        v1 = factor*v1
-        v2 = sqrt(me%kT/me%Q2)*me%random(thread)%normal()
-      end subroutine initialize
-      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine sinr_initialize
 
   !-------------------------------------------------------------------------------------------------
@@ -577,7 +555,7 @@ contains
     !$omp parallel num_threads(me%nthreads)
     block
       integer :: thread, i
-      real(rb) :: lb0, b2, b, coshbt, sinhbt, s, dsdt
+      real(rb) :: lb0, b2, b, coshbt, sinhbt, s, spinv
 
       thread = omp_get_thread_num() + 1
       do i = me%first(thread), me%last(thread)
@@ -587,9 +565,9 @@ contains
         coshbt = cosh(b*dt)
         sinhbt = sinh(b*dt)
         s = (lb0*(coshbt - one) + b*sinhbt)/b2
-        dsdt = (lb0*sinhbt + b*coshbt)/b
-        v(i) = (v(i) + a(i)*s)/dsdt
-        me%v1(i) = me%v1(i)/dsdt
+        spinv = b/(lb0*sinhbt + b*coshbt)
+        v(i) = (v(i) + a(i)*s)*spinv
+        me%v1(i) = me%v1(i)*spinv
       end do
     end block
     !$omp end parallel
