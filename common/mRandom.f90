@@ -131,10 +131,21 @@ type, extends(i32rng) :: mt19937
     procedure :: init  => mt19937_init
 end type mt19937
 
+!> A class for handling pseudo-random number sequences using the xoroshiro128+ algorithm.
+type, extends(i32rng) :: xoroshiro128plus
+  integer(8), private       :: s(2) = [123456789_8, 987654321_8]
+  integer(8), private       :: separator(32) ! Separate cache lines (parallel use)
+  contains
+    ! Deferred bindings:
+    procedure :: init => xoroshiro128plus_init
+    procedure :: i32 => xoroshiro128plus_i32
+end type xoroshiro128plus
+
 private :: i32rng_uniform, i32rng_normal, i32rng_timing
 private :: shr3_init, shr3_i32
 private :: kiss_init, kiss_i32
 private :: mt19937_init, mt19937_i32
+private :: xoroshiro128plus_init, xoroshiro128plus_i32
 
 contains
   !-----------------------------------------------------------------------------
@@ -388,5 +399,33 @@ contains
     y = ieor(y,iand(ishft(y,15),t2_mask))
     i32 = ieor(y,ishft(y,-18))
   end function mt19937_i32
+  !-----------------------------------------------------------------------------
+  !                                  Xoroshiro128+
+  !-----------------------------------------------------------------------------
+  subroutine xoroshiro128plus_init( a, seed )
+    class(xoroshiro128plus), intent(inout) :: a
+    integer,                 intent(in)    :: seed
+    type(shr3) :: b
+    call b % setup(seed)
+    a%s = int([b%i32(), b%i32()], 8)
+  end subroutine xoroshiro128plus_init
+  !-----------------------------------------------------------------------------
+  function xoroshiro128plus_i32( a ) result( i32 )
+    class(xoroshiro128plus), intent(inout) :: a
+    integer(4)                             :: i32
+    integer(8) :: t(2)
+    t = a%s
+    i32 = int(t(1) + t(2), 4)
+    t(2) = ieor(t(1), t(2))
+    a%s(1) = ieor(ieor(rotl(t(1), 55), t(2)), shiftl(t(2), 14))
+    a%s(2) = rotl(t(2), 36)
+    contains
+      pure function rotl(x, k) result( res )
+        integer(8), intent(in) :: x
+        integer,    intent(in) :: k
+        integer(8)             :: res
+        res = ior(shiftl(x, k), shiftr(x, 64 - k))
+      end function rotl
+  end function xoroshiro128plus_i32
   !-----------------------------------------------------------------------------
 end module mRandom
