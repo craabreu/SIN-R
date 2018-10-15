@@ -18,7 +18,7 @@ type, abstract :: tThermostat
   integer,       allocatable :: last(:)   ! The last degree of freedom of each thread
   character(sl), allocatable :: keyword(:)
   real(rb),      allocatable :: value(:)
-  type(xoroshiro128plus), allocatable :: random(:) ! A random number generator for each thread
+  type(xrsr128), allocatable :: random(:) ! A random number generator for each thread
   contains
     procedure :: setup => tThermostat_setup
     procedure :: get_value => tThermostat_get_value

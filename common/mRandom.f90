@@ -132,23 +132,24 @@ type, extends(i32rng) :: mt19937
 end type mt19937
 
 !> A class for handling pseudo-random number sequences using the xoroshiro128+ algorithm.
-type, extends(i32rng) :: xoroshiro128plus
-  integer(8), private :: s(2) = [123456789_8, 987654321_8]
-  logical :: saved = .false.
-  real(8) :: rnor
+type, extends(i32rng) :: xrsr128
+  integer(8), private :: s1 = 123456789_8
+  integer(8), private :: s2 = 987654321_8
+  logical,    private :: saved = .false.
+  real(8),    private :: rnor
   contains
-    procedure :: init => xoroshiro128plus_init
-    procedure :: i32 => xoroshiro128plus_i32
-    procedure :: i64 => xoroshiro128plus_i64
-    procedure :: uniform => xoroshiro128plus_uniform
-    procedure :: normal => xoroshiro128plus_normal
-end type xoroshiro128plus
+    procedure :: init => xrsr128_init
+    procedure :: i32 => xrsr128_i32
+    procedure :: i64 => xrsr128_i64
+    procedure :: uniform => xrsr128_uniform
+    procedure :: normal => xrsr128_normal
+end type xrsr128
 
 private :: i32rng_uniform, i32rng_normal, i32rng_timing
 private :: shr3_init, shr3_i32
 private :: kiss_init, kiss_i32
 private :: mt19937_init, mt19937_i32
-private :: xoroshiro128plus_init, xoroshiro128plus_i32
+private :: xrsr128_init, xrsr128_i32
 
 contains
   !-----------------------------------------------------------------------------
@@ -405,51 +406,47 @@ contains
   !-----------------------------------------------------------------------------
   !                                  Xoroshiro128+
   !-----------------------------------------------------------------------------
-  subroutine xoroshiro128plus_init( a, seed )
-    class(xoroshiro128plus), intent(inout) :: a
+  subroutine xrsr128_init( a, seed )
+    class(xrsr128), intent(inout) :: a
     integer,                 intent(in)    :: seed
-    integer(4) :: b(2), c(2)
     integer(8) :: mold
     type(shr3) :: random
     call random % setup(seed)
-    b = [random%i32(), random%i32()]
-    c = [random%i32(), random%i32()]
-    a%s = [transfer(b, mold), transfer(c, mold)]
-  end subroutine xoroshiro128plus_init
+    a%s1 = transfer([random%i32(), random%i32()], mold)
+    a%s2 = transfer([random%i32(), random%i32()], mold)
+  end subroutine xrsr128_init
   !-----------------------------------------------------------------------------
-  function xoroshiro128plus_i32( a ) result( i32 )
-    class(xoroshiro128plus), intent(inout) :: a
+  function xrsr128_i32( a ) result( i32 )
+    class(xrsr128), intent(inout) :: a
     integer(4)                             :: i32
     i32 = int(a%i64(), 4)
-  end function xoroshiro128plus_i32
+  end function xrsr128_i32
   !-----------------------------------------------------------------------------
-  function xoroshiro128plus_i64( a ) result( i64 )
-    class(xoroshiro128plus), intent(inout) :: a
+  function xrsr128_i64( a ) result( i64 )
+    class(xrsr128), intent(inout) :: a
     integer(8)                             :: i64
-    integer(8) :: t(2)
-    t = a%s
-    i64 = t(1) + t(2)
-    t(2) = ieor(t(1), t(2))
-    a%s(1) = ieor(ieor(ior(shiftl(t(1), 55), shiftr(t(1), 9)), t(2)), shiftl(t(2), 14))
-    a%s(2) = ior(shiftl(t(2), 36), shiftr(t(2), 28))
-  end function xoroshiro128plus_i64
+    i64 = a%s1 + a%s2
+    a%s2 = ieor(a%s1, a%s2)
+    a%s1 = ieor(ieor(ior(shiftl(a%s1, 55), shiftr(a%s1, 9)), a%s2), shiftl(a%s2, 14))
+    a%s2 = ior(shiftl(a%s2, 36), shiftr(a%s2, 28))
+  end function xrsr128_i64
   !-----------------------------------------------------------------------------
-  function xoroshiro128plus_uniform( a ) result( uni )
-    class(xoroshiro128plus), intent(inout) :: a
+  function xrsr128_uniform( a ) result( uni )
+    class(xrsr128), intent(inout) :: a
     real(8)                                :: uni
     integer(8), parameter :: z = shiftl(1023_8, 52)
     uni = transfer(ior(z, shiftr(a%i64(), 12)), uni) - 1.0_8
-  end function xoroshiro128plus_uniform
+  end function xrsr128_uniform
   !-----------------------------------------------------------------------------
-  function xoroshiro128plus_normal( a ) result( rnor )
-    class(xoroshiro128plus), intent(inout) :: a
+  function xrsr128_normal( a ) result( rnor )
+    class(xrsr128), intent(inout) :: a
     real(8)                                :: rnor
     real(8) :: x, y, sum_sq, factor
     if (a%saved) then
       rnor = a%rnor
       a%saved = .false.
     else
-      call draw_values
+      call draw_values()
       do while ((sum_sq >= 1.0_8) .or. (sum_sq == 0.0_8))
         call draw_values
       end do
@@ -459,11 +456,11 @@ contains
       a%saved = .true.
     end if
     contains
-      subroutine draw_values
+      subroutine draw_values()
         x = 2.0_8 * a%uniform() - 1.0_8
         y = 2.0_8 * a%uniform() - 1.0_8
         sum_sq = x*x + y*y
       end subroutine draw_values
-  end function xoroshiro128plus_normal
+  end function xrsr128_normal
   !-----------------------------------------------------------------------------
 end module mRandom

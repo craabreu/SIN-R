@@ -59,7 +59,7 @@ character(256) :: filename, configFile
 
 integer :: threads
 type(tEmDee)  :: md
-type(xoroshiro128plus) :: random
+type(xrsr128) :: random
 type(c_ptr), allocatable :: model(:)
 type(c_ptr), allocatable :: bond_model(:)
 type(c_ptr), allocatable :: angle_model(:)

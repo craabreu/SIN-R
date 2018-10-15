@@ -7,7 +7,7 @@ q-SPC-FW.lmp
 [Internal cut-off, External cut-off, and switching width (Å)]
 6.0 10.0 2.0
 [Shift potential prior to smoothing it? (T/F)]
-T
+F
 [Precision of reciprocal space calculations]
 0.00023
 [Seed for random numbers]
