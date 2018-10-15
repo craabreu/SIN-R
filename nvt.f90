@@ -196,11 +196,6 @@ contains
     call EmDee_upload( md, "charges"//c_null_char, c_loc(Config%Charge(1)) )
     call EmDee_upload( md, "box"//c_null_char, c_loc(Config%Lx) )
     call EmDee_upload( md, "coordinates"//c_null_char, c_loc(Config%R(1,1)) )
-    if (Config%velocity_input) then
-      call EmDee_upload( md, "momenta"//c_null_char, c_loc(Config%P(1,1)) )
-    else
-      call EmDee_random_momenta( md, kT, .true._1, seed )
-    end if
 
     address = EmDee_memory_address( md, "coordinates"//c_null_char )
     nullify(Config%R)
@@ -237,7 +232,7 @@ end subroutine Configure_System
     integer, intent(in) :: step
     real(rb) :: Temp, kineticEnergy, TotalEnergy
     kineticEnergy = half*sum(Config%invMass*Config%P**2)
-    Temp = (kineticEnergy/KE_sp)*T
+    Temp = thermostat % compute_kT( Config%P )/kB
     TotalEnergy = md%Energy%Potential + kineticEnergy
     properties = trim(adjustl(int2str(step))) // " " // &
                  join(real2str([ Temp, &
@@ -362,7 +357,8 @@ end subroutine Configure_System
         value   = [real(rb) :: gamma]
     end select
 
-    call thermostat % setup( dof, Config%invMass, kT, tau, seed, threads, keyword, value )
+    call thermostat % setup( 3, Config%natoms, Config%mass(Config%Type), &
+                             kT, tau, seed, threads, keyword, value )
   end subroutine Setup_Simulation
 !---------------------------------------------------------------------------------------------------
   subroutine rdf_save( file )

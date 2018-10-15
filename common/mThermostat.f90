@@ -8,22 +8,28 @@ use omp_lib
 implicit none
 
 type, abstract :: tThermostat
-  integer  :: dof                         ! Number of degrees of freedom
-  integer  :: seed                        ! Seed for random numbers
-  integer  :: nthreads                    ! Number of parallel threads
-  real(rb) :: kT                          ! Temperature in energy units
-  real(rb) :: tau                         ! Characteristic time scale
-  real(rb),      allocatable :: m(:)      ! Mass associated to each degree of freedom
-  integer,       allocatable :: first(:)  ! The first degree of freedom of each thread
-  integer,       allocatable :: last(:)   ! The last degree of freedom of each thread
-  character(sl), allocatable :: keyword(:)
-  real(rb),      allocatable :: value(:)
-  type(xrsr128), allocatable :: random(:) ! A random number generator for each thread
+  integer  :: d                            ! Dimensionality of the system
+  integer  :: N                            ! Number of particles in the system
+  integer  :: dof                          ! Number of degrees of freedom
+  integer  :: seed                         ! Seed for random numbers
+  integer  :: nthreads                     ! Number of parallel threads
+  real(rb) :: kT                           ! Temperature in energy units
+  real(rb) :: tau                          ! Characteristic time scale
+  logical  :: columns = .true.             ! True if each particle fills a column of a matrix
+  integer  :: actualDof                    ! Actual number of degrees of freedom
+  real(rb),      allocatable :: invm(:)    ! Inverse mass associated to each degree of freedom
+  integer,       allocatable :: first(:)   ! The first degree of freedom of each thread
+  integer,       allocatable :: last(:)    ! The last degree of freedom of each thread
+  character(sl), allocatable :: keyword(:) ! List of keywords for finishing thermostat setup
+  real(rb),      allocatable :: value(:)   ! Values associated to the list of keywords
+  type(xrsr128), allocatable :: random(:)  ! A random number generator for each thread
   contains
     procedure :: setup => tThermostat_setup
     procedure :: get_value => tThermostat_get_value
     procedure :: finish_setup => tThermostat_finish_setup
     procedure :: initialize => tThermostat_initialize
+    procedure :: zero_total_momenta => tThermostat_zero_total_momenta
+    procedure :: compute_kT => tThermostat_compute_kT
     procedure :: boost => tThermostat_boost
     procedure :: integrate => tThermostat_integrate
     procedure :: energy => tThermostat_energy
@@ -116,25 +122,38 @@ contains
   !                                A L L    T H E R M O S T A T S
   !=================================================================================================
 
-  subroutine tThermostat_setup( me, dof, mass, kT, tau, seed, threads, keyword, value )
-    class(tThermostat), intent(inout) :: me
-    integer,            intent(in)    :: dof
-    real(rb),           intent(in)    :: mass(*), kT, tau
-    integer,            intent(in)    :: seed, threads
-    character(*),       intent(in), optional :: keyword(:)
-    real(rb),           intent(in), optional :: value(:)
+  subroutine tThermostat_setup( me, d, N, mass, kT, tau, seed, threads, keyword, value, columns )
+    class(tThermostat),     intent(inout) :: me
+    integer,                intent(in)    :: d, N
+    real(rb),               intent(in)    :: mass(*), kT, tau
+    integer,                intent(in)    :: seed, threads
+    character(*), optional, intent(in)    :: keyword(:)
+    real(rb),     optional, intent(in)    :: value(:)
+    logical,      optional, intent(in)    :: columns
 
     integer :: i, perThread, newseed
+    real(rb), allocatable :: m(:,:)
 
-    me%dof = dof
-    me%m = mass(1:dof)
+    me%d = d
+    me%N = N
+    me%dof = d*N
     me%kT = kT
     me%tau = tau
+    if (present(columns)) me%columns = columns
+    if (me%columns) then
+      allocate( m(d,N) )
+      forall (i=1:N) m(:,i) = mass(i)
+    else
+      allocate( m(N,d) )
+      forall (i=1:N) m(i,:) = mass(i)
+    end if
+    me%invm = reshape(one/m, [me%dof])
+    me%actualDof = me%dof
 
     me%nthreads =  threads
-    perThread = (dof + threads - 1)/threads
+    perThread = (me%dof + threads - 1)/threads
     me%first = [((i - 1)*perThread + 1, i=1, threads)]
-    me%last = [(min(i*perThread, dof), i=1, threads)]
+    me%last = [(min(i*perThread, me%dof), i=1, threads)]
     allocate( me%random(threads) )
     newseed = seed
     do i = 1, threads
@@ -183,24 +202,70 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine tThermostat_initialize( me, v )
+  subroutine tThermostat_zero_total_momenta( me, p )
     class(tThermostat), intent(inout) :: me
-    real(rb),           intent(inout) :: v(*)
+    real(rb), target,   intent(inout) :: p(*)
+
+    integer :: i
+    real(rb) :: vcm(me%d)
+    real(rb), pointer :: pp(:,:)
+
+    if (me%columns) then
+      call c_f_pointer(c_loc(p(1)), pp, [me%d, me%N])
+      vcm = sum(pp,dim=2)/sum(one/me%invm)
+      p(1:me%dof) = p(1:me%dof)*me%invm
+      forall (i=1:me%N) pp(:,i) = pp(:,i) - vcm
+    else
+      call c_f_pointer(c_loc(p(1)), pp, [me%N, me%d])
+      vcm = sum(pp,dim=1)/sum(one/me%invm)
+      p(1:me%dof) = p(1:me%dof)*me%invm
+      forall (i=1:me%N) pp(i,:) = pp(i,:) - vcm
+    end if
+    p(1:me%dof) = p(1:me%dof)/me%invm
+  end subroutine tThermostat_zero_total_momenta
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine tThermostat_initialize( me, p )
+    class(tThermostat), intent(inout) :: me
+    real(rb),           intent(inout) :: p(*)
+
+    !$omp parallel num_threads(me%nthreads)
+    block
+      integer :: thread, i
+      thread = omp_get_thread_num() + 1
+      do i = me%first(thread), me%last(thread)
+        p(i) = sqrt(me%kT/me%invm(i))*me%random(thread)%normal()
+      end do
+    end block
+    !$omp end parallel
+    call me % zero_total_momenta( p )
+    p(1:me%dof) = p(1:me%dof)*sqrt(me%actualDof*me%kT/sum(me%invm*p(1:me%dof)**2))
+
   end subroutine tThermostat_initialize
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine tThermostat_boost( me, dt, a, v )
+  function tThermostat_compute_kT( me, p ) result( kT )
+    class(tThermostat), intent(in) :: me
+    real(rb),           intent(in) :: p(*)
+    real(rb)                       :: kT
+    kT = sum(me%invm*p(1:me%dof)**2)/me%actualDof
+  end function tThermostat_compute_kT
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine tThermostat_boost( me, dt, F, p )
     class(tThermostat), intent(inout) :: me
-    real(rb),           intent(in)    :: dt, a(*)
-    real(rb),           intent(inout) :: v(*)
+    real(rb),           intent(in)    :: dt, F(*)
+    real(rb),           intent(inout) :: p(*)
 
     !$omp parallel num_threads(me%nthreads)
     block
       integer :: thread, i
       thread = omp_get_thread_num() + 1
       forall (i = me%first(thread):me%last(thread))
-        v(i) = v(i) + dt*a(i)
+        p(i) = p(i) + dt*F(i)
       end forall
     end block
     !$omp end parallel
@@ -208,10 +273,10 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine tThermostat_integrate( me, timestep, v )
+  subroutine tThermostat_integrate( me, timestep, p )
     class(tThermostat), intent(inout) :: me
     real(rb),           intent(in)    :: timestep
-    real(rb),           intent(inout) :: v(*)
+    real(rb),           intent(inout) :: p(*)
   end subroutine tThermostat_integrate
 
   !-------------------------------------------------------------------------------------------------
@@ -234,7 +299,8 @@ contains
     nchains = nint(me%get_value("nchains", one))
     nloops = nint(me%get_value("nloops", one))
     me%NC = nchains
-    me%LKT = (me%dof - 3)*me%kT
+    me%actualDof = me%dof - 3
+    me%LKT = me%actualDof*me%kT
     me%nloops = nloops
     allocate( me%InvQ(nchains), me%eta(nchains), me%p(nchains) )
     me%InvQ(1) = one/(me%LKT*me%tau**2)
@@ -258,15 +324,15 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine nhc_integrate( me, timestep, v )
+  subroutine nhc_integrate( me, timestep, p )
     class(nhc), intent(inout) :: me
     real(rb),   intent(in)    :: timestep
-    real(rb),   intent(inout) :: v(*)
+    real(rb),   intent(inout) :: p(*)
 
     integer  :: i, j
     real(rb) :: TwoKE, dt, dt_2, twodt, alpha, alphaSum, factor
 
-    TwoKE = sum(me%m*v(1:me%dof)**2)
+    TwoKE = sum(me%invm*p(1:me%dof)**2)
     dt = timestep/me%nloops
     dt_2 = half*dt
     twodt = two*dt
@@ -288,7 +354,7 @@ contains
       me%p(me%NC) = me%p(me%NC) + (me%p(me%NC-1)**2*me%InvQ(me%NC-1) - me%kT)*dt_2
     end do
     me%eta(1) = me%eta(1) + alphaSum*dt
-    v(1:me%dof) = v(1:me%dof)*exp(-dt*alphaSum)
+    p(1:me%dof) = p(1:me%dof)*exp(-dt*alphaSum)
 
     contains
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -331,14 +397,14 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine csvr_integrate( me, timestep, v )
+  subroutine csvr_integrate( me, timestep, p )
     class(csvr), intent(inout) :: me
     real(rb),    intent(in)    :: timestep
-    real(rb),    intent(inout) :: v(*)
+    real(rb),    intent(inout) :: p(*)
 
     real(rb) :: TwoKE, alphaSq, R1, x, sumRs, A, B, C
 
-    TwoKE = sum(me%m*v(1:me%dof)**2)
+    TwoKE = sum(me%invm*p(1:me%dof)**2)
     R1 = me%random(1)%normal()
     if (mod(me%dof, 2) == 1) then
       x = (me%dof - 1)/2
@@ -352,7 +418,7 @@ contains
     C = me%TwoKE/(me%dof*TwoKE)
     alphaSq = A + C*B*(R1**2 + sumRs) + 2.0*sqrt(C*B*A)*R1
     me%Hthermo = me%Hthermo + (one - alphaSq)*half*TwoKE
-    v(1:me%dof) = v(1:me%dof)*sqrt(alphaSq)
+    p(1:me%dof) = p(1:me%dof)*sqrt(alphaSq)
 
   end subroutine csvr_integrate
 
@@ -365,16 +431,16 @@ contains
 
     me%gamma = me%get_value("friction", one/me%tau)
     allocate( me%invSqrtM(me%dof) )
-    me%invSqrtM = one/sqrt(me%m)
+    me%invSqrtM = one/sqrt(me%invm)
 
   end subroutine langevin_finish_setup
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine langevin_integrate( me, timestep, v )
+  subroutine langevin_integrate( me, timestep, p )
     class(langevin), intent(inout) :: me
     real(rb),    intent(in)    :: timestep
-    real(rb),    intent(inout) :: v(*)
+    real(rb),    intent(inout) :: p(*)
 
     real(rb) :: A, B
 
@@ -386,7 +452,7 @@ contains
       integer :: thread, i
       thread = omp_get_thread_num() + 1
       do i = me%first(thread), me%last(thread)
-        v(i) = A*v(i) + B*me%invSqrtM(i)*me%random(thread)%normal()
+        p(i) = A*p(i) + B*me%invSqrtM(i)*me%random(thread)%normal()
       end do
     end block
     !$omp end parallel
@@ -403,9 +469,9 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine isokinetic_initialize( me, v )
+  subroutine isokinetic_initialize( me, p )
     class(isokinetic), intent(inout) :: me
-    real(rb),          intent(inout) :: v(*)
+    real(rb),          intent(inout) :: p(*)
 
     real(rb) :: twokin(me%nthreads)
 
@@ -416,20 +482,20 @@ contains
       thread = omp_get_thread_num() + 1
       first = me%first(thread)
       last = me%last(thread)
-      twokin(thread) = sum(me%m(first:last)*v(first:last)**2)
+      twokin(thread) = sum(me%invm(first:last)*p(first:last)**2)
       !$omp barrier
       twoKE = sum(twokin)
-      v(first:last) = v(first:last)*sqrt(me%twoKE/twoKE)
+      p(first:last) = p(first:last)*sqrt(me%twoKE/twoKE)
     end block
     !$omp end parallel
   end subroutine isokinetic_initialize
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine isokinetic_boost( me, dt, a, v )
+  subroutine isokinetic_boost( me, dt, F, p )
     class(isokinetic), intent(inout) :: me
-    real(rb),    intent(in)    :: dt, a(*)
-    real(rb),    intent(inout) :: v(*)
+    real(rb),    intent(in)    :: dt, F(*)
+    real(rb),    intent(inout) :: p(*)
 
     real(rb) :: Fv(me%nthreads), Fa(me%nthreads)
 
@@ -441,8 +507,8 @@ contains
       thread = omp_get_thread_num() + 1
       first = me%first(thread)
       last = me%last(thread)
-      Fv(thread) = sum(me%m(first:last)*a(first:last)*v(first:last))
-      Fa(thread) = sum(me%m(first:last)*a(first:last)**2)
+      Fv(thread) = sum(me%invm(first:last)*F(first:last)*p(first:last))
+      Fa(thread) = sum(me%invm(first:last)*F(first:last)**2)
       !$omp barrier
       lb0 = sum(Fv)/me%twoKE
       b2 = sum(Fa)/me%twoKE
@@ -451,7 +517,7 @@ contains
       sinhbt = sinh(b*dt)
       s = (lb0*(coshbt - one) + b*sinhbt)/b2
       spinv = b/(lb0*sinhbt + b*coshbt)
-      v(first:last) = (v(first:last) + a(first:last)*s)*spinv
+      p(first:last) = (p(first:last) + F(first:last)*s)*spinv
     end block
     !$omp end parallel
 
@@ -473,9 +539,9 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine sinr_initialize( me, v )
+  subroutine sinr_initialize( me, p )
     class(sinr), intent(inout) :: me
-    real(rb),    intent(inout) :: v(*)
+    real(rb),    intent(inout) :: p(*)
 
     real(rb) :: twokin(me%nthreads)
 
@@ -486,17 +552,17 @@ contains
       thread = omp_get_thread_num() + 1
       first = me%first(thread)
       last = me%last(thread)
-      twokin(thread) = sum(me%m(first:last)*v(first:last)**2)
+      twokin(thread) = sum(me%invm(first:last)*p(first:last)**2)
       !$omp barrier
       twoKE = sum(twokin)
-      v(first:last) = v(first:last)*sqrt(half*me%dof*me%kT/twoKE)
+      p(first:last) = p(first:last)*sqrt(half*me%dof*me%kT/twoKE)
       sigma1 = sqrt(me%kT/me%Q1)
       sigma2 = sqrt(me%kT/me%Q2)
       do i = first, last
         me%v1(i) = sigma1*me%random(thread)%normal()
         me%v2(i) = sigma2*me%random(thread)%normal()
-        factor = sqrt(me%kT/(me%m(i)*v(i)**2 + me%halfQ1*me%v1(i)**2))
-        v(i) = factor*v(i)
+        factor = sqrt(me%kT/(me%invm(i)*p(i)**2 + me%halfQ1*me%v1(i)**2))
+        p(i) = factor*p(i)
         me%v1(i) = factor*me%v1(i)
       end do
     end block
@@ -505,10 +571,10 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine sinr_integrate( me, timestep, v )
+  subroutine sinr_integrate( me, timestep, p )
     class(sinr), intent(inout) :: me
     real(rb),    intent(in)    :: timestep
-    real(rb),    intent(inout) :: v(*)
+    real(rb),    intent(inout) :: p(*)
 
     real(rb) :: dt_2
     real(rb) :: A, B, C
@@ -538,8 +604,8 @@ contains
         real(rb) :: x, v1x, H
         x = exp(-me%v2(i)*dt)
         v1x = me%v1(i)*x
-        H = sqrt(me%kT/(me%m(i)*v(i)**2 + me%halfQ1*v1x*v1x))
-        v(i) = v(i)*H
+        H = sqrt(me%kT/(me%invm(i)*p(i)**2 + me%halfQ1*v1x*v1x))
+        p(i) = p(i)*H
         me%v1(i) = v1x*H
       end subroutine isokinetic_part
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
@@ -547,10 +613,10 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine sinr_boost( me, dt, a, v )
+  subroutine sinr_boost( me, dt, F, p )
     class(sinr), intent(inout) :: me
-    real(rb),    intent(in)    :: dt, a(*)
-    real(rb),    intent(inout) :: v(*)
+    real(rb),    intent(in)    :: dt, F(*)
+    real(rb),    intent(inout) :: p(*)
 
     !$omp parallel num_threads(me%nthreads)
     block
@@ -559,15 +625,15 @@ contains
 
       thread = omp_get_thread_num() + 1
       do i = me%first(thread), me%last(thread)
-        lb0 = me%m(i)*a(i)*v(i)/me%kT
-        bsq = me%m(i)*a(i)**2/me%kT
+        lb0 = me%invm(i)*F(i)*p(i)/me%kT
+        bsq = me%invm(i)*F(i)**2/me%kT
         b = sqrt(bsq)
         bdt = b*dt
         x = coshxm1_x2(bdt)
         y = sinhx_x(bdt)
         s = (lb0*x*dt + y)*dt
         spinv = one/(lb0*y*dt + bdt*bdt*x + one)
-        v(i) = (v(i) + a(i)*s)*spinv
+        p(i) = (p(i) + F(i)*s)*spinv
         me%v1(i) = me%v1(i)*spinv
       end do
     end block

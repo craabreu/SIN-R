@@ -7,7 +7,7 @@ q-SPC-FW.lmp
 [Internal cut-off, External cut-off, and switching width (Å)]
 6.0 10.0 2.0
 [Shift potential prior to smoothing it? (T/F)]
-F
+T
 [Precision of reciprocal space calculations]
 0.00023
 [Seed for random numbers]
@@ -25,7 +25,7 @@ F
 [Numbers of equilibration and production steps]
 500 500
 [Thermostatting method: 0) NVE; 1) NHC; 2) Bussi; 3) Langevin; 4) Isokinetic; 5) SIN(R)]
-5
+1
 [Thermostat parameters: tau (fs), gamma (1/fs)]
 10. 0.1
 [Nosé-Hoover-related parameters: nchain, nloops]
