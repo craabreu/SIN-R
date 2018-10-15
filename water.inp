@@ -9,13 +9,13 @@ q-SPC-FW.lmp
 [Shift potential prior to smoothing it? (T/F)]
 T
 [Precision of reciprocal space calculations]
-0.00023
+0.00001
 [Seed for random numbers]
 2345
 [Largest integration time step (fs)]
-5.0
+0.5
 [Number of RESPA loops for each one of three layers]
-5 5 1
+1 1 1
 [Skin distance for neighbor lists (Å)]
 2
 [Interval for saving configurations]
@@ -23,14 +23,14 @@ T
 [Interval for displaying properties]
 10
 [Numbers of equilibration and production steps]
-500 500
-[Thermostatting method: 0) NVE; 1) NHC; 2) Bussi; 3) Langevin; 4) Isokinetic; 5) SIN(R)]
-1
+0 500
+[Thermostatting method: 0) NVE; 1) NHC; 2) Bussi; 3) Langevin; 4) Isokinetic; 5) SIN(R)-XO-RESPA; 6) SIN(R)-NEW]
+3
 [Thermostat parameters: tau (fs), gamma (1/fs)]
 10. 0.1
 [Nosé-Hoover-related parameters: nchain, nloops]
 6 10
 [Compute rdf: number of pairs]
-0
+3
 [Compute rdf parameters: nevery bins itypes jtypes]
-50 50 1 1 1 2
+10 100 1 1 1 2 2 2

@@ -7,7 +7,7 @@ use omp_lib
 
 implicit none
 
-type, abstract :: tThermostat
+type :: tThermostat
   integer  :: d                            ! Dimensionality of the system
   integer  :: N                            ! Number of particles in the system
   integer  :: dof                          ! Number of degrees of freedom
@@ -30,8 +30,9 @@ type, abstract :: tThermostat
     procedure :: initialize => tThermostat_initialize
     procedure :: zero_total_momenta => tThermostat_zero_total_momenta
     procedure :: compute_kT => tThermostat_compute_kT
+    procedure :: external => tThermostat_external
     procedure :: boost => tThermostat_boost
-    procedure :: integrate => tThermostat_integrate
+    procedure :: internal => tThermostat_internal
     procedure :: energy => tThermostat_energy
 end type tThermostat
 
@@ -56,7 +57,7 @@ type, extends(tThermostat) :: nhc
   contains
     procedure :: finish_setup => nhc_finish_setup
     procedure :: energy => nhc_energy
-    procedure :: integrate => nhc_integrate
+    procedure :: internal => nhc_internal
 end type
 
 !---------------------------------------------------------------------------------------------------
@@ -69,7 +70,7 @@ type, extends(tThermostat) :: csvr
 contains
   procedure :: finish_setup => csvr_finish_setup
   procedure :: energy => csvr_energy
-  procedure :: integrate => csvr_integrate
+  procedure :: internal => csvr_internal
 end type csvr
 
 !---------------------------------------------------------------------------------------------------
@@ -81,7 +82,7 @@ type, extends(tThermostat) :: langevin
   real(rb), allocatable :: invSqrtM(:)
 contains
   procedure :: finish_setup => langevin_finish_setup
-  procedure :: integrate => langevin_integrate
+  procedure :: internal => langevin_internal
 end type langevin
 
 !---------------------------------------------------------------------------------------------------
@@ -100,7 +101,7 @@ end type isokinetic
 !        S T O C H A S T I C    I S O K I N E T I C    N O S E - H O O V E R    R E S P A
 !---------------------------------------------------------------------------------------------------
 
-type, extends(tThermostat) :: sinr
+type, abstract, extends(tThermostat) :: sinr
   real(rb) :: Q1       ! Inertial parameter
   real(rb) :: Q2       ! Inertial parameter
   real(rb) :: halfQ1   ! Half inertial parameter
@@ -110,9 +111,19 @@ type, extends(tThermostat) :: sinr
 contains
   procedure :: finish_setup => sinr_finish_setup
   procedure :: initialize => sinr_initialize
-  procedure :: integrate => sinr_integrate
   procedure :: boost => sinr_boost
 end type sinr
+
+type, extends(sinr) :: sinr_new
+contains
+  procedure :: internal => sinr_new_internal
+end type sinr_new
+
+type, extends(sinr) :: sinr_xo_respa
+contains
+  procedure :: internal => sinr_xo_respa_internal
+  procedure :: external => sinr_xo_respa_external
+end type sinr_xo_respa
 
 !---------------------------------------------------------------------------------------------------
 
@@ -255,6 +266,14 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
+  subroutine tThermostat_external( me, timestep, p )
+    class(tThermostat), intent(inout) :: me
+    real(rb),           intent(in)    :: timestep
+    real(rb),           intent(inout) :: p(*)
+  end subroutine tThermostat_external
+
+  !-------------------------------------------------------------------------------------------------
+
   subroutine tThermostat_boost( me, dt, F, p )
     class(tThermostat), intent(inout) :: me
     real(rb),           intent(in)    :: dt, F(*)
@@ -273,11 +292,11 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine tThermostat_integrate( me, timestep, p )
+  subroutine tThermostat_internal( me, timestep, p )
     class(tThermostat), intent(inout) :: me
     real(rb),           intent(in)    :: timestep
     real(rb),           intent(inout) :: p(*)
-  end subroutine tThermostat_integrate
+  end subroutine tThermostat_internal
 
   !-------------------------------------------------------------------------------------------------
 
@@ -324,7 +343,7 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine nhc_integrate( me, timestep, p )
+  subroutine nhc_internal( me, timestep, p )
     class(nhc), intent(inout) :: me
     real(rb),   intent(in)    :: timestep
     real(rb),   intent(inout) :: p(*)
@@ -341,15 +360,15 @@ contains
     do i = 1, me%nloops
       me%p(me%NC) = me%p(me%NC) + (me%p(me%NC-1)**2*me%InvQ(me%NC-1) - me%kT)*dt_2
       do j = me%NC-1, 2, -1
-        call integrate( me, j, me%p(j+1)*me%InvQ(j+1), me%p(j-1)**2*me%InvQ(j-1) - me%kT, dt_2 )
+        call internal( me, j, me%p(j+1)*me%InvQ(j+1), me%p(j-1)**2*me%InvQ(j-1) - me%kT, dt_2 )
       end do
-      call integrate( me, 1, me%p(2)*me%InvQ(2), factor**2*twoKE - me%LkT, dt_2 )
+      call internal( me, 1, me%p(2)*me%InvQ(2), factor**2*twoKE - me%LkT, dt_2 )
       alpha = me%p(1)*me%InvQ(1)
       alphaSum = alphaSum + alpha
       factor = exp(-alphaSum*dt)
-      call integrate( me, 1, me%p(2)*me%InvQ(2), factor**2*twoKE - me%LkT, dt_2 )
+      call internal( me, 1, me%p(2)*me%InvQ(2), factor**2*twoKE - me%LkT, dt_2 )
       do j = 2, me%NC-1
-        call integrate( me, j, me%p(j+1)*me%InvQ(j+1), me%p(j-1)**2*me%InvQ(j-1) - me%kT, dt_2 )
+        call internal( me, j, me%p(j+1)*me%InvQ(j+1), me%p(j-1)**2*me%InvQ(j-1) - me%kT, dt_2 )
       end do
       me%p(me%NC) = me%p(me%NC) + (me%p(me%NC-1)**2*me%InvQ(me%NC-1) - me%kT)*dt_2
     end do
@@ -358,13 +377,13 @@ contains
 
     contains
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-      pure subroutine integrate( me, j, alpha, G, dt )
+      pure subroutine internal( me, j, alpha, G, dt )
         class(nhc), intent(inout) :: me
         integer,    intent(in) :: j
         real(rb),   intent(in) :: alpha, G, dt
         me%p(j) = me%p(j) + (G - alpha*me%p(j))*phi(alpha*dt)*dt
         me%eta(j+1) = me%eta(j+1) + alpha*dt
-      end subroutine integrate
+      end subroutine internal
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
       pure real(rb) function phi( x )
         real(rb), intent(in) :: x
@@ -375,7 +394,7 @@ contains
         end if
       end function phi
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-  end subroutine nhc_integrate
+  end subroutine nhc_internal
 
   !=================================================================================================
   !                  S T O C H A S T I C    V E L O C I T Y    R E S C A L I N G
@@ -397,7 +416,7 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine csvr_integrate( me, timestep, p )
+  subroutine csvr_internal( me, timestep, p )
     class(csvr), intent(inout) :: me
     real(rb),    intent(in)    :: timestep
     real(rb),    intent(inout) :: p(*)
@@ -420,7 +439,7 @@ contains
     me%Hthermo = me%Hthermo + (one - alphaSq)*half*TwoKE
     p(1:me%dof) = p(1:me%dof)*sqrt(alphaSq)
 
-  end subroutine csvr_integrate
+  end subroutine csvr_internal
 
   !=================================================================================================
   !                                         L A N G E V I N
@@ -437,7 +456,7 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine langevin_integrate( me, timestep, p )
+  subroutine langevin_internal( me, timestep, p )
     class(langevin), intent(inout) :: me
     real(rb),    intent(in)    :: timestep
     real(rb),    intent(inout) :: p(*)
@@ -456,7 +475,7 @@ contains
       end do
     end block
     !$omp end parallel
-  end subroutine langevin_integrate
+  end subroutine langevin_internal
 
   !=================================================================================================
   !                                       I S O K I N E T I C
@@ -474,6 +493,8 @@ contains
     real(rb),          intent(inout) :: p(*)
 
     real(rb) :: twokin(me%nthreads)
+
+    call me % tThermostat % initialize( p )
 
     !$omp parallel num_threads(me%nthreads)
     block
@@ -545,6 +566,8 @@ contains
 
     real(rb) :: twokin(me%nthreads)
 
+    call me % tThermostat % initialize( p )
+
     !$omp parallel num_threads(me%nthreads)
     block
       integer  :: thread, first, last, i
@@ -555,7 +578,7 @@ contains
       twokin(thread) = sum(me%invm(first:last)*p(first:last)**2)
       !$omp barrier
       twoKE = sum(twokin)
-      p(first:last) = p(first:last)*sqrt(half*me%dof*me%kT/twoKE)
+      p(first:last) = 0.25_rb*p(first:last)
       sigma1 = sqrt(me%kT/me%Q1)
       sigma2 = sqrt(me%kT/me%Q2)
       do i = first, last
@@ -571,13 +594,42 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine sinr_integrate( me, timestep, p )
+  subroutine sinr_boost( me, dt, F, p )
     class(sinr), intent(inout) :: me
-    real(rb),    intent(in)    :: timestep
+    real(rb),    intent(in)    :: dt, F(*)
     real(rb),    intent(inout) :: p(*)
 
-    real(rb) :: dt_2
-    real(rb) :: A, B, C
+    !$omp parallel num_threads(me%nthreads)
+    block
+      integer :: thread, i
+      real(rb) :: lb0, bsq, b, bdt, x, y, s, spinv
+
+      thread = omp_get_thread_num() + 1
+      do i = me%first(thread), me%last(thread)
+        lb0 = me%invm(i)*F(i)*p(i)/me%kT
+        bsq = me%invm(i)*F(i)**2/me%kT
+        b = sqrt(bsq)
+        bdt = b*dt
+        x = coshxm1_x2(bdt)
+        y = sinhx_x(bdt)
+        s = (lb0*x*dt + y)*dt
+        spinv = one/(lb0*y*dt + bdt*bdt*x + one)
+        p(i) = (p(i) + F(i)*s)*spinv
+        me%v1(i) = me%v1(i)*spinv
+      end do
+    end block
+    !$omp end parallel
+
+  end subroutine sinr_boost
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine sinr_new_internal( me, timestep, p )
+    class(sinr_new), intent(inout) :: me
+    real(rb),        intent(in)    :: timestep
+    real(rb),        intent(inout) :: p(*)
+
+    real(rb) :: dt_2, A, B, C
 
     dt_2 = half*timestep
     A = exp(-me%gamma*timestep)
@@ -609,37 +661,68 @@ contains
         me%v1(i) = v1x*H
       end subroutine isokinetic_part
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
-  end subroutine sinr_integrate
+  end subroutine sinr_new_internal
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine sinr_boost( me, dt, F, p )
-    class(sinr), intent(inout) :: me
-    real(rb),    intent(in)    :: dt, F(*)
-    real(rb),    intent(inout) :: p(*)
+  subroutine sinr_xo_respa_internal( me, timestep, p )
+    class(sinr_xo_respa), intent(inout) :: me
+    real(rb),             intent(in)    :: timestep
+    real(rb),             intent(inout) :: p(*)
+
+    real(rb) :: A, B
+
+    A = exp(-me%gamma*timestep)
+    B = sqrt(me%kT*(one - A*A)/me%Q2)
 
     !$omp parallel num_threads(me%nthreads)
     block
       integer :: thread, i
-      real(rb) :: lb0, bsq, b, bdt, x, y, s, spinv
-
       thread = omp_get_thread_num() + 1
       do i = me%first(thread), me%last(thread)
-        lb0 = me%invm(i)*F(i)*p(i)/me%kT
-        bsq = me%invm(i)*F(i)**2/me%kT
-        b = sqrt(bsq)
-        bdt = b*dt
-        x = coshxm1_x2(bdt)
-        y = sinhx_x(bdt)
-        s = (lb0*x*dt + y)*dt
-        spinv = one/(lb0*y*dt + bdt*bdt*x + one)
-        p(i) = (p(i) + F(i)*s)*spinv
-        me%v1(i) = me%v1(i)*spinv
+        me%v2(i) = A*me%v2(i) + B*me%random(thread)%normal()
+      end do
+    end block
+    !$omp end parallel
+  end subroutine sinr_xo_respa_internal
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine sinr_xo_respa_external( me, timestep, p )
+    class(sinr_xo_respa), intent(inout) :: me
+    real(rb),             intent(in)    :: timestep
+    real(rb),             intent(inout) :: p(*)
+
+    real(rb) :: C
+
+    C = half*timestep/me%Q2
+
+    !$omp parallel num_threads(me%nthreads)
+    block
+      integer :: thread, i
+      thread = omp_get_thread_num() + 1
+      do i = me%first(thread), me%last(thread)
+        me%v2(i) = me%v2(i) + C*(me%Q1*me%v1(i)**2 - me%kT)
+        call isokinetic_part( i, timestep )
+        me%v2(i) = me%v2(i) + C*(me%Q1*me%v1(i)**2 - me%kT)
       end do
     end block
     !$omp end parallel
 
-  end subroutine sinr_boost
+    contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine isokinetic_part( i, dt )
+        integer,  intent(in) :: i
+        real(rb), intent(in) :: dt
+        real(rb) :: x, v1x, H
+        x = exp(-me%v2(i)*dt)
+        v1x = me%v1(i)*x
+        H = sqrt(me%kT/(me%invm(i)*p(i)**2 + me%halfQ1*v1x*v1x))
+        p(i) = p(i)*H
+        me%v1(i) = v1x*H
+      end subroutine isokinetic_part
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+  end subroutine sinr_xo_respa_external
 
   !=================================================================================================
 

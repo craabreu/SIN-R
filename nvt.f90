@@ -23,7 +23,8 @@ integer, parameter :: velocity_verlet = 0, &
                       stochastic_velocity_rescaling = 2, &
                       langevin_thermostat = 3, &
                       isokinetic_ensemble = 4, &
-                      stochastic_isokinetic_nh_respa = 5
+                      SIN_R_xo_respa = 5, &
+                      SIN_R_new_respa = 6
 
 ! Simulation specifications:
 integer  :: seed, Nconf, thermo, Nequil, Nprod
@@ -87,7 +88,7 @@ do step = 1, NEquil
 #ifdef VERLET
   call Verlet_Step( dt )
 #else
-  call RESPA_Step( dt, 3 )
+  call RESPA_Step( dt )
 #endif
   if (md%Options%Compute) call writeln( properties(step) )
 end do
@@ -103,7 +104,7 @@ if (computeRDF) then
   allocate(gr(bins,npairs), source = 0.0_rb)
   allocate(rdf(bins,npairs), source = 0.0_rb)
   counter = 1
-  call EmDee_rdf(md, bins, npairs, itype, jtype, gr)
+  call EmDee_rdf(md, bins, RcIn, npairs, itype, jtype, gr)
 end if
 
 do step = NEquil+1, NEquil+NProd
@@ -111,17 +112,17 @@ do step = NEquil+1, NEquil+NProd
 #ifdef VERLET
   call Verlet_Step( dt )
 #else
-  call RESPA_Step( dt, 3 )
+  call RESPA_Step( dt )
 #endif
   if (md%Options%Compute) call writeln( properties(step) )
   if (mod(step,Nconf)==0) call Config % Save_XYZ( trim(Base)//".xyz", append = .true. )
   if (computeRDF .and. (mod(step, nevery) == 0)) then
-    call EmDee_rdf(md, bins, npairs, itype, jtype, rdf)
+    call EmDee_rdf(md, bins, RcIn, npairs, itype, jtype, rdf)
     gr = gr + rdf
     counter = counter + 1
   end if
 end do
-if (computeRDF) call rdf_save( trim(Base)//".rdf" )
+if (computeRDF) call rdf_save( trim(Base)//"_rdf.csv" )
 call writeln( "Loop time of", real2str(md%Time%Total), "s." )
 call Report( md )
 call Config % Write( trim(Base)//"_out.lmp", velocities = .true. )
@@ -289,7 +290,6 @@ end subroutine Configure_System
     read(inp,*); read(inp,*) tau, gamma
     read(inp,*); read(inp,*) M, nloops
     read(inp,*); read(inp,*) npairs
-    computeRDF = npairs /= 0
     allocate( itype(npairs), jtype(npairs) )
     read(inp,*); read(inp,*) nevery, bins, (itype(i), jtype(i), i=1, npairs)
     close(inp)
@@ -328,6 +328,7 @@ end subroutine Configure_System
     kT = kB*T
     KE_sp = half*dof*kT
     Volume = product(L)
+    computeRDF = nevery /= 0
 
     call random % setup( seed )
 
@@ -342,8 +343,10 @@ end subroutine Configure_System
         allocate( langevin :: thermostat )
       case (isokinetic_ensemble)
         allocate( isokinetic :: thermostat )
-      case (stochastic_isokinetic_nh_respa)
-        allocate( sinr :: thermostat )
+      case (SIN_R_xo_respa)
+        allocate( sinr_xo_respa :: thermostat )
+      case (SIN_R_new_respa)
+        allocate( sinr_new :: thermostat )
       case default
         call error("Specified thermostat method not implemented")
     end select
@@ -352,7 +355,7 @@ end subroutine Configure_System
       case (nose_hoover_chain)
         keyword = [character(sl) :: "nchains", "nloops"]
         value   = [real(rb) :: M, nloops]
-      case (langevin_thermostat, stochastic_isokinetic_nh_respa)
+      case (langevin_thermostat, SIN_R_xo_respa, SIN_R_new_respa)
         keyword = [character(sl) :: "friction"]
         value   = [real(rb) :: gamma]
     end select
@@ -370,11 +373,11 @@ end subroutine Configure_System
     do i = 1, npairs
       write(Ci,'(I3)') itype(i)
       write(Cj,'(I3)') jtype(i)
-      write(unit,'(A)',advance='no') " g("//trim(adjustl(Ci))//","//trim(adjustl(Cj))//")"
+      write(unit,'(A)',advance='no') ", g("//trim(adjustl(Ci))//"-"//trim(adjustl(Cj))//")"
     end do
     write(unit,*)
     do i = 1, bins
-      write(unit,*) (i - 0.5)*Rc/bins, gr(i,:)/real(counter,rb)
+      write(unit,'(A)') trim(join(real2str([(i - 0.5)*RcIn/bins, gr(i,:)/real(counter,rb)]), ","))
     end do
   end subroutine rdf_save
   !-------------------------------------------------------------------------------------------------
@@ -390,14 +393,14 @@ end subroutine Configure_System
     dt_2 = half*dt
     call thermostat % boost( dt_2, F(:,:,3), Config%P )
     call EmDee_displace( md, one, zero, dt_2 )
-    call thermostat % integrate( dt, Config%P )
+    call thermostat % internal( dt, Config%P )
     call EmDee_displace( md, one, zero, dt_2 )
     call EmDee_compute_forces( md )
     call thermostat % boost( dt_2, F(:,:,3), Config%P )
 
   end subroutine Verlet_Step
   !-------------------------------------------------------------------------------------------------
-  subroutine RESPA_Step( timestep, layer )
+  subroutine RESPA_Substep( timestep, layer )
     real(rb), intent(in) :: timestep
     integer,  intent(in) :: layer
 
@@ -411,17 +414,23 @@ end subroutine Configure_System
       call thermostat % boost( dt_2, F(:,:,layer), Config%P )
       if (layer == 1) then
         call EmDee_displace( md, one, zero, dt_2 )
-        call thermostat % integrate( dt, Config%P )
+        call thermostat % internal( dt, Config%P )
         call EmDee_displace( md, one, zero, dt_2 )
       else
-        call RESPA_Step( dt, layer-1 )
+        call RESPA_Substep( dt, layer-1 )
       end if
       call EmDee_switch_model_layer( md, layer )
       call EmDee_compute_forces( md )
       if (layer == 3) call discount_forces()
       call thermostat % boost( dt_2, F(:,:,layer), Config%P )
     end do
-
+  end subroutine RESPA_Substep
+  !-------------------------------------------------------------------------------------------------
+  subroutine RESPA_Step( timestep )
+    real(rb), intent(in) :: timestep
+    call thermostat % external( half*timestep, Config%P )
+    call RESPA_Substep( timestep, 3 )
+    call thermostat % external( half*timestep, Config%P )
   end subroutine RESPA_Step
 !===================================================================================================
 end program lj_nvt
