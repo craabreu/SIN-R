@@ -133,12 +133,15 @@ end type mt19937
 
 !> A class for handling pseudo-random number sequences using the xoroshiro128+ algorithm.
 type, extends(i32rng) :: xoroshiro128plus
-  integer(8), private       :: s(2) = [123456789_8, 987654321_8]
-  integer(8), private       :: separator(32) ! Separate cache lines (parallel use)
+  integer(8), private :: s(2) = [123456789_8, 987654321_8]
+  logical :: saved = .false.
+  real(8) :: rnor
   contains
-    ! Deferred bindings:
     procedure :: init => xoroshiro128plus_init
     procedure :: i32 => xoroshiro128plus_i32
+    procedure :: i64 => xoroshiro128plus_i64
+    procedure :: uniform => xoroshiro128plus_uniform
+    procedure :: normal => xoroshiro128plus_normal
 end type xoroshiro128plus
 
 private :: i32rng_uniform, i32rng_normal, i32rng_timing
@@ -405,27 +408,62 @@ contains
   subroutine xoroshiro128plus_init( a, seed )
     class(xoroshiro128plus), intent(inout) :: a
     integer,                 intent(in)    :: seed
-    type(shr3) :: b
-    call b % setup(seed)
-    a%s = int([b%i32(), b%i32()], 8)
+    integer(4) :: b(2), c(2)
+    integer(8) :: mold
+    type(shr3) :: random
+    call random % setup(seed)
+    b = [random%i32(), random%i32()]
+    c = [random%i32(), random%i32()]
+    a%s = [transfer(b, mold), transfer(c, mold)]
   end subroutine xoroshiro128plus_init
   !-----------------------------------------------------------------------------
   function xoroshiro128plus_i32( a ) result( i32 )
     class(xoroshiro128plus), intent(inout) :: a
     integer(4)                             :: i32
+    i32 = int(a%i64(), 4)
+  end function xoroshiro128plus_i32
+  !-----------------------------------------------------------------------------
+  function xoroshiro128plus_i64( a ) result( i64 )
+    class(xoroshiro128plus), intent(inout) :: a
+    integer(8)                             :: i64
     integer(8) :: t(2)
     t = a%s
-    i32 = int(t(1) + t(2), 4)
+    i64 = t(1) + t(2)
     t(2) = ieor(t(1), t(2))
-    a%s(1) = ieor(ieor(rotl(t(1), 55), t(2)), shiftl(t(2), 14))
-    a%s(2) = rotl(t(2), 36)
+    a%s(1) = ieor(ieor(ior(shiftl(t(1), 55), shiftr(t(1), 9)), t(2)), shiftl(t(2), 14))
+    a%s(2) = ior(shiftl(t(2), 36), shiftr(t(2), 28))
+  end function xoroshiro128plus_i64
+  !-----------------------------------------------------------------------------
+  function xoroshiro128plus_uniform( a ) result( uni )
+    class(xoroshiro128plus), intent(inout) :: a
+    real(8)                                :: uni
+    integer(8), parameter :: z = shiftl(1023_8, 52)
+    uni = transfer(ior(z, shiftr(a%i64(), 12)), uni) - 1.0_8
+  end function xoroshiro128plus_uniform
+  !-----------------------------------------------------------------------------
+  function xoroshiro128plus_normal( a ) result( rnor )
+    class(xoroshiro128plus), intent(inout) :: a
+    real(8)                                :: rnor
+    real(8) :: x, y, sum_sq, factor
+    if (a%saved) then
+      rnor = a%rnor
+      a%saved = .false.
+    else
+      call draw_values
+      do while ((sum_sq >= 1.0_8) .or. (sum_sq == 0.0_8))
+        call draw_values
+      end do
+      factor = sqrt(-2.0_8*log(sum_sq)/sum_sq)
+      rnor = x*factor
+      a%rnor = y*factor
+      a%saved = .true.
+    end if
     contains
-      pure function rotl(x, k) result( res )
-        integer(8), intent(in) :: x
-        integer,    intent(in) :: k
-        integer(8)             :: res
-        res = ior(shiftl(x, k), shiftr(x, 64 - k))
-      end function rotl
-  end function xoroshiro128plus_i32
+      subroutine draw_values
+        x = 2.0_8 * a%uniform() - 1.0_8
+        y = 2.0_8 * a%uniform() - 1.0_8
+        sum_sq = x*x + y*y
+      end subroutine draw_values
+  end function xoroshiro128plus_normal
   !-----------------------------------------------------------------------------
 end module mRandom
