@@ -3,13 +3,13 @@ water
 [Initial configuration file]
 q-SPC-FW.lmp 
 [Temperature (K)]
-298
+300
 [Internal cut-off, External cut-off, and switching width (Å)]
 6.0 10.0 2.0
 [Shift potential prior to smoothing it? (T/F)]
 T
 [Precision of reciprocal space calculations]
-0.00001
+0.0001
 [Seed for random numbers]
 2345
 [Largest integration time step (fs)]
@@ -23,9 +23,9 @@ T
 [Interval for displaying properties]
 10
 [Numbers of equilibration and production steps]
-0 500
+500 500
 [Thermostatting method: 0) NVE; 1) NHC; 2) Bussi; 3) Langevin; 4) Isokinetic; 5) SIN(R)-XO-RESPA; 6) SIN(R)-NEW]
-3
+2
 [Thermostat parameters: tau (fs), gamma (1/fs)]
 10. 0.1
 [Nosé-Hoover-related parameters: nchain, nloops]

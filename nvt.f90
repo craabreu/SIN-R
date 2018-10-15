@@ -9,8 +9,6 @@ use mThermostat
 use iso_c_binding
 use EmDee
 
-! #define VERLET
-
 implicit none
 
 real(rb), parameter :: mvv2e = 2390.057364_rb         ! Da*A^2/fs^2 to kcal/mol
@@ -85,11 +83,7 @@ call writeln( titles )
 call writeln( properties(0) )
 do step = 1, NEquil
   md%Options%Compute = mod(step,thermo) == 0
-#ifdef VERLET
-  call Verlet_Step( dt )
-#else
   call RESPA_Step( dt )
-#endif
   if (md%Options%Compute) call writeln( properties(step) )
 end do
 call writeln( "Loop time of", real2str(md%Time%Total), "s." )
@@ -109,11 +103,7 @@ end if
 
 do step = NEquil+1, NEquil+NProd
   md%Options%Compute = mod(step,thermo) == 0
-#ifdef VERLET
-  call Verlet_Step( dt )
-#else
   call RESPA_Step( dt )
-#endif
   if (md%Options%Compute) call writeln( properties(step) )
   if (mod(step,Nconf)==0) call Config % Save_XYZ( trim(Base)//".xyz", append = .true. )
   if (computeRDF .and. (mod(step, nevery) == 0)) then
@@ -211,9 +201,7 @@ contains
 
     call EmDee_switch_model_layer( md, nlayers )
     call EmDee_compute_forces( md )
-#ifndef VERLET
     call discount_forces()
-#endif
     call thermostat % initialize( Config%P )
 
 end subroutine Configure_System
@@ -384,21 +372,6 @@ end subroutine Configure_System
   subroutine discount_forces()
     F(:,:,3) = F(:,:,3) - (F(:,:,1) + F(:,:,2))
   end subroutine discount_forces
-  !-------------------------------------------------------------------------------------------------
-  subroutine Verlet_Step( dt )
-    real(rb), intent(in) :: dt
-
-    real(rb) :: dt_2
-
-    dt_2 = half*dt
-    call thermostat % boost( dt_2, F(:,:,3), Config%P )
-    call EmDee_displace( md, one, zero, dt_2 )
-    call thermostat % internal( dt, Config%P )
-    call EmDee_displace( md, one, zero, dt_2 )
-    call EmDee_compute_forces( md )
-    call thermostat % boost( dt_2, F(:,:,3), Config%P )
-
-  end subroutine Verlet_Step
   !-------------------------------------------------------------------------------------------------
   subroutine RESPA_Substep( timestep, layer )
     real(rb), intent(in) :: timestep
