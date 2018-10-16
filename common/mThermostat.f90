@@ -48,6 +48,7 @@ end type nve
 !---------------------------------------------------------------------------------------------------
 
 type, extends(tThermostat) :: nhc
+  logical :: embedded = .false.     !> True if the thermostat is embedded between coordinate moves
   integer,  private :: NC           !> Number of thermostats in the chain
   integer,  private :: nloops       !> Number of RESPA loops for integration
   real(rb), private :: LKT          !> kT times the number of degrees of freedom
@@ -57,7 +58,9 @@ type, extends(tThermostat) :: nhc
   contains
     procedure :: finish_setup => nhc_finish_setup
     procedure :: energy => nhc_energy
+    procedure :: integration => nhc_integration
     procedure :: internal => nhc_internal
+    procedure :: external => nhc_external
 end type
 
 !---------------------------------------------------------------------------------------------------
@@ -327,6 +330,7 @@ contains
 
     nchains = nint(me%get_value("nchains", one))
     nloops = nint(me%get_value("nloops", one))
+    me%embedded = me%get_value("embedded", zero) /= zero
     me%NC = nchains
     me%actualDof = me%dof - 3
     me%LKT = me%actualDof*me%kT
@@ -353,7 +357,7 @@ contains
 
   !-------------------------------------------------------------------------------------------------
 
-  subroutine nhc_internal( me, timestep, p )
+  subroutine nhc_integration( me, timestep, p )
     class(nhc), intent(inout) :: me
     real(rb),   intent(in)    :: timestep
     real(rb),   intent(inout) :: p(*)
@@ -404,6 +408,25 @@ contains
         end if
       end function phi
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+  end subroutine nhc_integration
+
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine nhc_external( me, timestep, p )
+    class(nhc), intent(inout) :: me
+    real(rb),   intent(in)    :: timestep
+    real(rb),   intent(inout) :: p(*)
+    if (.not.me%embedded) call me % integration( timestep, p )
+  end subroutine nhc_external
+
+  !-------------------------------------------------------------------------------------------------
+
+  subroutine nhc_internal( me, timestep, p )
+    class(nhc), intent(inout) :: me
+    real(rb),   intent(in)    :: timestep
+    real(rb),   intent(inout) :: p(*)
+    if (me%embedded) call me % integration( timestep, p )
   end subroutine nhc_internal
 
   !=================================================================================================

@@ -42,6 +42,7 @@ real(rb), pointer :: F(:,:,:)
 
 ! Thermostat variables:
 integer  :: method, M, nloops
+logical  :: embedded
 real(rb) :: tau, gamma
 class(tThermostat), pointer :: thermostat
 
@@ -276,7 +277,7 @@ end subroutine Configure_System
     read(inp,*); read(inp,*) Nequil, Nprod
     read(inp,*); read(inp,*) method
     read(inp,*); read(inp,*) tau, gamma
-    read(inp,*); read(inp,*) M, nloops
+    read(inp,*); read(inp,*) embedded, M, nloops
     read(inp,*); read(inp,*) npairs
     allocate( itype(npairs), jtype(npairs) )
     read(inp,*); read(inp,*) nevery, bins, (itype(i), jtype(i), i=1, npairs)
@@ -300,7 +301,8 @@ end subroutine Configure_System
     call writeln( "Thermostat method:", int2str(method) )
     call writeln( "Thermostat time scale:", real2str(tau), "fs" )
     call writeln( "Thermostat friction coefficient:", real2str(gamma), "fs^(-1)" )
-    call writeln( "Nose-Hoover parameters:", int2str(M), int2str(nloops) )
+    call writeln( "Nose-Hoover parameters:", merge("embedded","original", embedded), &
+                                             int2str(M), int2str(nloops) )
     call writeln()
   end subroutine Read_Specifications
   !-------------------------------------------------------------------------------------------------
@@ -341,8 +343,8 @@ end subroutine Configure_System
 
     select case (method)
       case (nose_hoover_chain)
-        keyword = [character(sl) :: "nchains", "nloops"]
-        value   = [real(rb) :: M, nloops]
+        keyword = [character(sl) :: "nchains", "nloops", "embedded"]
+        value   = [real(rb) :: M, nloops, transfer(embedded,1)]
       case (langevin_thermostat, SIN_R_xo_respa, SIN_R_new_respa)
         keyword = [character(sl) :: "friction"]
         value   = [real(rb) :: gamma]
