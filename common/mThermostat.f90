@@ -242,16 +242,21 @@ contains
     real(rb),           intent(inout) :: p(*)
 
     !$omp parallel num_threads(me%nthreads)
-    block
-      integer :: thread, i
-      thread = omp_get_thread_num() + 1
-      do i = me%first(thread), me%last(thread)
-        p(i) = sqrt(me%kT/me%invm(i))*me%random(thread)%normal()
-      end do
-    end block
+    call task( omp_get_thread_num() + 1 )
     !$omp end parallel
     call me % zero_total_momenta( p )
     p(1:me%dof) = p(1:me%dof)*sqrt(me%actualDof*me%kT/sum(me%invm*p(1:me%dof)**2))
+
+    contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine task( thread )
+        integer, intent(in) :: thread
+        integer :: i
+        do i = me%first(thread), me%last(thread)
+          p(i) = sqrt(me%kT/me%invm(i))*me%random(thread)%normal()
+        end do
+      end subroutine task
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 
   end subroutine tThermostat_initialize
 
@@ -280,14 +285,19 @@ contains
     real(rb),           intent(inout) :: p(*)
 
     !$omp parallel num_threads(me%nthreads)
-    block
-      integer :: thread, i
-      thread = omp_get_thread_num() + 1
-      forall (i = me%first(thread):me%last(thread))
-        p(i) = p(i) + dt*F(i)
-      end forall
-    end block
+    call task( omp_get_thread_num() + 1 )
     !$omp end parallel
+    
+    contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine task( thread )
+        integer, intent(in) :: thread
+        integer :: i
+        forall (i = me%first(thread):me%last(thread))
+          p(i) = p(i) + dt*F(i)
+        end forall
+      end subroutine task
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine tThermostat_boost
 
   !-------------------------------------------------------------------------------------------------
@@ -467,14 +477,19 @@ contains
     B = sqrt(me%kT*(one - A*A))
 
     !$omp parallel num_threads(me%nthreads)
-    block
-      integer :: thread, i
-      thread = omp_get_thread_num() + 1
-      do i = me%first(thread), me%last(thread)
-        p(i) = A*p(i) + B*me%invSqrtM(i)*me%random(thread)%normal()
-      end do
-    end block
+    call task( omp_get_thread_num() + 1 )
     !$omp end parallel
+
+    contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine task( thread )
+        integer, intent(in) :: thread
+        integer :: i
+        do i = me%first(thread), me%last(thread)
+          p(i) = A*p(i) + B*me%invSqrtM(i)*me%random(thread)%normal()
+        end do
+      end subroutine task
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine langevin_internal
 
   !=================================================================================================
@@ -497,18 +512,23 @@ contains
     call me % tThermostat % initialize( p )
 
     !$omp parallel num_threads(me%nthreads)
-    block
-      integer  :: thread, first, last
-      real(rb) :: twoKE
-      thread = omp_get_thread_num() + 1
-      first = me%first(thread)
-      last = me%last(thread)
-      twokin(thread) = sum(me%invm(first:last)*p(first:last)**2)
-      !$omp barrier
-      twoKE = sum(twokin)
-      p(first:last) = p(first:last)*sqrt(me%twoKE/twoKE)
-    end block
+    call task( omp_get_thread_num() + 1 )
     !$omp end parallel
+
+    contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine task( thread )
+        integer, intent(in) :: thread
+        integer  :: first, last
+        real(rb) :: twoKE
+        first = me%first(thread)
+        last = me%last(thread)
+        twokin(thread) = sum(me%invm(first:last)*p(first:last)**2)
+        !$omp barrier
+        twoKE = sum(twokin)
+        p(first:last) = p(first:last)*sqrt(me%twoKE/twoKE)
+      end subroutine task
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine isokinetic_initialize
 
   !-------------------------------------------------------------------------------------------------
@@ -521,27 +541,32 @@ contains
     real(rb) :: Fv(me%nthreads), Fa(me%nthreads)
 
     !$omp parallel num_threads(me%nthreads)
-    block
-      integer :: thread, first, last
-      real(rb) :: lb0, b2, b, coshbt, sinhbt, s, spinv
-
-      thread = omp_get_thread_num() + 1
-      first = me%first(thread)
-      last = me%last(thread)
-      Fv(thread) = sum(me%invm(first:last)*F(first:last)*p(first:last))
-      Fa(thread) = sum(me%invm(first:last)*F(first:last)**2)
-      !$omp barrier
-      lb0 = sum(Fv)/me%twoKE
-      b2 = sum(Fa)/me%twoKE
-      b = sqrt(b2)
-      coshbt = cosh(b*dt)
-      sinhbt = sinh(b*dt)
-      s = (lb0*(coshbt - one) + b*sinhbt)/b2
-      spinv = b/(lb0*sinhbt + b*coshbt)
-      p(first:last) = (p(first:last) + F(first:last)*s)*spinv
-    end block
+    call task( omp_get_thread_num() + 1 )
     !$omp end parallel
 
+    contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine task( thread )
+        integer, intent(in) :: thread
+
+        integer :: first, last
+        real(rb) :: lb0, b2, b, coshbt, sinhbt, s, spinv
+
+        first = me%first(thread)
+        last = me%last(thread)
+        Fv(thread) = sum(me%invm(first:last)*F(first:last)*p(first:last))
+        Fa(thread) = sum(me%invm(first:last)*F(first:last)**2)
+        !$omp barrier
+        lb0 = sum(Fv)/me%twoKE
+        b2 = sum(Fa)/me%twoKE
+        b = sqrt(b2)
+        coshbt = cosh(b*dt)
+        sinhbt = sinh(b*dt)
+        s = (lb0*(coshbt - one) + b*sinhbt)/b2
+        spinv = b/(lb0*sinhbt + b*coshbt)
+        p(first:last) = (p(first:last) + F(first:last)*s)*spinv
+      end subroutine task
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine isokinetic_boost
 
   !=================================================================================================
@@ -569,27 +594,32 @@ contains
     call me % tThermostat % initialize( p )
 
     !$omp parallel num_threads(me%nthreads)
-    block
-      integer  :: thread, first, last, i
-      real(rb) :: twoKE, sigma1, sigma2, factor
-      thread = omp_get_thread_num() + 1
-      first = me%first(thread)
-      last = me%last(thread)
-      twokin(thread) = sum(me%invm(first:last)*p(first:last)**2)
-      !$omp barrier
-      twoKE = sum(twokin)
-      p(first:last) = 0.25_rb*p(first:last)
-      sigma1 = sqrt(me%kT/me%Q1)
-      sigma2 = sqrt(me%kT/me%Q2)
-      do i = first, last
-        me%v1(i) = sigma1*me%random(thread)%normal()
-        me%v2(i) = sigma2*me%random(thread)%normal()
-        factor = sqrt(me%kT/(me%invm(i)*p(i)**2 + me%halfQ1*me%v1(i)**2))
-        p(i) = factor*p(i)
-        me%v1(i) = factor*me%v1(i)
-      end do
-    end block
+    call task( omp_get_thread_num() + 1 )
     !$omp end parallel
+
+    contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine task( thread )
+        integer, intent(in) :: thread
+        integer  :: first, last, i
+        real(rb) :: twoKE, sigma1, sigma2, factor
+        first = me%first(thread)
+        last = me%last(thread)
+        twokin(thread) = sum(me%invm(first:last)*p(first:last)**2)
+        !$omp barrier
+        twoKE = sum(twokin)
+        p(first:last) = 0.25_rb*p(first:last)
+        sigma1 = sqrt(me%kT/me%Q1)
+        sigma2 = sqrt(me%kT/me%Q2)
+        do i = first, last
+          me%v1(i) = sigma1*me%random(thread)%normal()
+          me%v2(i) = sigma2*me%random(thread)%normal()
+          factor = sqrt(me%kT/(me%invm(i)*p(i)**2 + me%halfQ1*me%v1(i)**2))
+          p(i) = factor*p(i)
+          me%v1(i) = factor*me%v1(i)
+        end do
+      end subroutine task
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine sinr_initialize
 
   !-------------------------------------------------------------------------------------------------
@@ -600,26 +630,29 @@ contains
     real(rb),    intent(inout) :: p(*)
 
     !$omp parallel num_threads(me%nthreads)
-    block
-      integer :: thread, i
-      real(rb) :: lb0, bsq, b, bdt, x, y, s, spinv
-
-      thread = omp_get_thread_num() + 1
-      do i = me%first(thread), me%last(thread)
-        lb0 = me%invm(i)*F(i)*p(i)/me%kT
-        bsq = me%invm(i)*F(i)**2/me%kT
-        b = sqrt(bsq)
-        bdt = b*dt
-        x = coshxm1_x2(bdt)
-        y = sinhx_x(bdt)
-        s = (lb0*x*dt + y)*dt
-        spinv = one/(lb0*y*dt + bdt*bdt*x + one)
-        p(i) = (p(i) + F(i)*s)*spinv
-        me%v1(i) = me%v1(i)*spinv
-      end do
-    end block
+    call task( omp_get_thread_num() + 1 )
     !$omp end parallel
 
+    contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine task( thread )
+        integer, intent(in) :: thread
+        integer :: i
+        real(rb) :: lb0, bsq, b, bdt, x, y, s, spinv
+        do i = me%first(thread), me%last(thread)
+          lb0 = me%invm(i)*F(i)*p(i)/me%kT
+          bsq = me%invm(i)*F(i)**2/me%kT
+          b = sqrt(bsq)
+          bdt = b*dt
+          x = coshxm1_x2(bdt)
+          y = sinhx_x(bdt)
+          s = (lb0*x*dt + y)*dt
+          spinv = one/(lb0*y*dt + bdt*bdt*x + one)
+          p(i) = (p(i) + F(i)*s)*spinv
+          me%v1(i) = me%v1(i)*spinv
+        end do
+      end subroutine task
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine sinr_boost
 
   !-------------------------------------------------------------------------------------------------
@@ -637,18 +670,20 @@ contains
     C = (one - A)/(me%gamma*me%Q2)
 
     !$omp parallel num_threads(me%nthreads)
-    block
-      integer :: thread, i
-      thread = omp_get_thread_num() + 1
-      do i = me%first(thread), me%last(thread)
-        call isokinetic_part( i, dt_2 )
-        me%v2(i) = A*me%v2(i) + B*me%random(thread)%normal() + C*(me%Q1*me%v1(i)**2 - me%kT)
-        call isokinetic_part( i, dt_2 )
-      end do
-    end block
+    call task( omp_get_thread_num() + 1 )
     !$omp end parallel
 
     contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine task( thread )
+        integer, intent(in) :: thread
+        integer :: i
+        do i = me%first(thread), me%last(thread)
+          call isokinetic_part( i, dt_2 )
+          me%v2(i) = A*me%v2(i) + B*me%random(thread)%normal() + C*(me%Q1*me%v1(i)**2 - me%kT)
+          call isokinetic_part( i, dt_2 )
+        end do
+      end subroutine task
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
       subroutine isokinetic_part( i, dt )
         integer,  intent(in) :: i
@@ -676,14 +711,19 @@ contains
     B = sqrt(me%kT*(one - A*A)/me%Q2)
 
     !$omp parallel num_threads(me%nthreads)
-    block
-      integer :: thread, i
-      thread = omp_get_thread_num() + 1
-      do i = me%first(thread), me%last(thread)
-        me%v2(i) = A*me%v2(i) + B*me%random(thread)%normal()
-      end do
-    end block
+    call task( omp_get_thread_num() + 1 )
     !$omp end parallel
+
+    contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine task( thread )
+        integer, intent(in) :: thread
+        integer :: i
+        do i = me%first(thread), me%last(thread)
+          me%v2(i) = A*me%v2(i) + B*me%random(thread)%normal()
+        end do
+      end subroutine task
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
   end subroutine sinr_xo_respa_internal
 
   !-------------------------------------------------------------------------------------------------
@@ -698,18 +738,20 @@ contains
     C = half*timestep/me%Q2
 
     !$omp parallel num_threads(me%nthreads)
-    block
-      integer :: thread, i
-      thread = omp_get_thread_num() + 1
-      do i = me%first(thread), me%last(thread)
-        me%v2(i) = me%v2(i) + C*(me%Q1*me%v1(i)**2 - me%kT)
-        call isokinetic_part( i, timestep )
-        me%v2(i) = me%v2(i) + C*(me%Q1*me%v1(i)**2 - me%kT)
-      end do
-    end block
+    call task( omp_get_thread_num() + 1 )
     !$omp end parallel
 
     contains
+      !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+      subroutine task( thread )
+        integer, intent(in) :: thread
+        integer :: i
+        do i = me%first(thread), me%last(thread)
+          me%v2(i) = me%v2(i) + C*(me%Q1*me%v1(i)**2 - me%kT)
+          call isokinetic_part( i, timestep )
+          me%v2(i) = me%v2(i) + C*(me%Q1*me%v1(i)**2 - me%kT)
+        end do
+      end subroutine task
       !- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
       subroutine isokinetic_part( i, dt )
         integer,  intent(in) :: i
